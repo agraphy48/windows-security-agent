@@ -15,10 +15,11 @@ class WhatsAppClient {
     this.currentQrDataUrl = null;
     this.isConnected = false;
     this.httpServer = null;
-    this.pendingActions = new Map(); // cleanSender -> { action, target, expiresAt }
+    this.pendingActions = new Map(); // cleanSender -> { action, target, targetNodeId, expiresAt }
     this.pendingCommands = new Map(); // cleanSender -> textToExecuteAfterUnlock
     this.adminSessions = new Map(); // cleanSender -> lastAuthTimestamp
     this.intruderAlerts = new Map(); // cleanSender -> lastAlertTimestamp
+    this.userMenuState = new Map(); // cleanSender -> { step: 'CHOOSE_SERVER' | 'SERVER_ACTIONS', targetNodeId, targetNodeName, serverList }
   }
 
   async start() {
@@ -37,8 +38,8 @@ class WhatsAppClient {
             <head><title>Security Agent Status</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
             <body style="font-family:sans-serif;text-align:center;padding:50px;background:#0d1117;color:#fff;">
               <h1 style="color:#2ea44f;">✅ WhatsApp Terhubung!</h1>
-              <p>Security Agent siap memantau server Windows.</p>
-              <p>Ketik <b>!help</b> di WhatsApp untuk melihat daftar perintah.</p>
+              <p>Security Agent siap memantau server.</p>
+              <p>Ketik <b>monitor</b> di WhatsApp untuk memilih server dan tindakan.</p>
             </body>
             </html>
           `);
@@ -101,7 +102,7 @@ class WhatsAppClient {
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
       auth: state,
-      browser: ['Windows Security Agent', 'Chrome', '1.0.0'],
+      browser: ['Server Security Agent', 'Chrome', '1.0.0'],
       generateHighQualityLinkPreview: false
     });
 
@@ -186,7 +187,7 @@ class WhatsAppClient {
         console.error('Gagal update .env:', err.message);
       }
 
-      await this.reply(senderJid, `🛡️ *Security Agent:* Nomor Anda (*${cleanSender}*) telah didaftarkan sebagai *Admin Utama Server*.\nKetik *!help* untuk melihat daftar kendali.`);
+      await this.reply(senderJid, `🛡️ *Security Agent:* Nomor Anda (*${cleanSender}*) telah didaftarkan sebagai *Admin Utama Server*.\nKetik *monitor* untuk memilih server dan tindakan.`);
     }
 
     if (!config.isAdmin(senderJid)) {
@@ -223,10 +224,11 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
 
     // 1. Cek perintah KUNCI manual
     const trimmedLower = text.trim().toLowerCase();
-    if (trimmedLower === 'lock' || trimmedLower === '!lock' || trimmedLower === 'kunci' || trimmedLower === '12' || trimmedLower === '!12') {
+    if (trimmedLower === 'lock' || trimmedLower === '!lock' || trimmedLower === 'kunci' || trimmedLower === '12' || trimmedLower === '!12' || trimmedLower === 'l') {
       this.adminSessions.delete(cleanSender);
       this.pendingCommands.delete(cleanSender);
       this.pendingActions.delete(cleanSender);
+      this.userMenuState.delete(cleanSender);
       return await this.reply(senderJid, '🔒 *Akses bot telah dikunci.* Kirim PIN Anda untuk membuka sesi kembali.');
     }
 
@@ -251,11 +253,12 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
           return await this.processCommand(senderJid, pendingCmd);
         } else {
           const timeoutText = config.pinTimeoutMinutes > 0 ? `Sesi aktif selama ${config.pinTimeoutMinutes} menit.` : 'Setiap perintah wajib menyertakan PIN.';
-          return await this.reply(senderJid, `🔓 *PIN BENAR - AKSES DIBUKA!*\n${timeoutText}\n\nKetik *monitor* untuk melihat panel kontrol.\nKetik *lock* kapan saja untuk mengunci kembali.`);
+          await this.reply(senderJid, `🔓 *PIN BENAR - AKSES DIBUKA!*\n${timeoutText}`);
+          return await this.showServerSelectionMenu(senderJid, cleanSender);
         }
       }
 
-      // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157" atau "2 465157")
+      // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157" atau "1 465157")
       const words = text.trim().split(/\s+/);
       if (words.length > 1 && words[words.length - 1] === config.securityPin) {
         this.adminSessions.set(cleanSender, Date.now());
@@ -313,9 +316,10 @@ Contoh: \`PIN <kode_pin>\` atau langsung kirim angka PIN.
         }
 
         if (inputPin === config.securityPin) {
+          const { action, target, targetNodeId } = pending;
           this.pendingActions.delete(cleanSender);
           await this.reply(senderJid, '🔑 PIN terverifikasi. Mengeksekusi tindakan...');
-          return await this.executeAction(senderJid, pending.action, pending.target);
+          return await this.executeAction(senderJid, action, target, targetNodeId);
         } else {
           this.pendingActions.delete(cleanSender);
           return await this.reply(senderJid, '❌ PIN keamanan salah! Tindakan dibatalkan demi keamanan server.');
@@ -334,268 +338,307 @@ Contoh: \`PIN <kode_pin>\` atau langsung kirim angka PIN.
     }
   }
 
+  // =========================================================================
+  // ALUR 2-LANGKAH: PILIH SERVER -> PILIH TINDAKAN
+  // =========================================================================
+
+  /**
+   * Langkah 1: Menampilkan Menu Pilihan Server
+   */
+  async showServerSelectionMenu(senderJid, cleanSender) {
+    const nodes = Array.from(cluster.nodes.values());
+    if (nodes.length === 0) {
+      nodes.push({
+        nodeId: config.nodeId,
+        name: config.nodeName,
+        role: config.clusterRole,
+        status: 'online'
+      });
+    }
+
+    this.userMenuState.set(cleanSender, {
+      step: 'CHOOSE_SERVER',
+      serverList: nodes
+    });
+
+    let msg = `🛡️ *PILIH SERVER UNTUK DIMONITOR* 🛡️\n-----------------------------------------\nSilakan balas dengan *NOMOR* server yang ingin Anda kelola:\n\n`;
+
+    nodes.forEach((n, idx) => {
+      const icon = n.status === 'online' ? '🟢' : '🔴';
+      const isLocal = n.nodeId === config.nodeId ? ' *(Server Ini)*' : '';
+      msg += `*${idx + 1}.* ${icon} *${n.name}* (\`${n.nodeId}\`)${isLocal}\n`;
+      msg += `   ↳ Status: *${n.status.toUpperCase()}* | Peran: ${n.role.toUpperCase()}\n\n`;
+    });
+
+    msg += `-----------------------------------------\n`;
+    msg += `📊 *A.* Laporan Status Seluruh Server (All Status)\n`;
+    msg += `🔒 *L.* Kunci Sesi Bot\n`;
+    msg += `-----------------------------------------\n`;
+    msg += `💡 *Ketik angka pilihan server (contoh: 1)*`;
+
+    return await this.reply(senderJid, msg);
+  }
+
+  /**
+   * Langkah 2: Menampilkan Menu Pilihan Tindakan pada Server Terpilih
+   */
+  async showServerActionsMenu(senderJid, cleanSender, targetNodeId) {
+    let node = cluster.nodes.get(targetNodeId);
+    if (!node) {
+      if (targetNodeId === config.nodeId) {
+        node = {
+          nodeId: config.nodeId,
+          name: config.nodeName,
+          role: config.clusterRole,
+          status: 'online'
+        };
+      } else {
+        await this.reply(senderJid, `⚠️ Server \`${targetNodeId}\` tidak ditemukan.`);
+        return await this.showServerSelectionMenu(senderJid, cleanSender);
+      }
+    }
+
+    this.userMenuState.set(cleanSender, {
+      step: 'SERVER_ACTIONS',
+      targetNodeId: node.nodeId,
+      targetNodeName: node.name
+    });
+
+    const icon = node.status === 'online' ? '🟢' : '🔴';
+    const msg = 
+`🎯 *SERVER TERPILIH:*
+*${node.name}* (\`${node.nodeId}\`)
+• Status: ${icon} ${node.status.toUpperCase()} | Peran: ${node.role.toUpperCase()}
+-----------------------------------------
+Silakan balas dengan *NOMOR* tindakan:
+
+*1.* 💻 Status Server (CPU, RAM, Disk, Uptime)
+*2.* 🛡️ Riwayat Ancaman & Log Mitigasi
+*3.* 🔍 Quick Scan Antivirus
+*4.* 🔬 Full Scan Antivirus
+*5.* 🔌 Port & Layanan Aktif (Listening Ports)
+*6.* 🐳 Status Container Docker
+*7.* 🔄 Restart Container Docker tertentu
+*8.* 🧱 Blokir Alamat IP di Firewall
+*9.* 🚨 Emergency Lockdown (Putus Akses Luar)
+*10.* 🌐 Restore Cloudflare Tunnel
+-----------------------------------------
+*0.* 🔙 Ganti / Pilih Server Lain
+*L.* 🔒 Kunci Sesi Bot
+-----------------------------------------
+💡 *Cukup ketik nomornya (contoh: 1) untuk menjalankan.*`;
+
+    return await this.reply(senderJid, msg);
+  }
+
+  // =========================================================================
+  // EKSEKUSI PERINTAH PADA SERVER (LOKAL ATAU REMOTE WORKER)
+  // =========================================================================
+
+  async executeServerStatus(senderJid, targetNodeId, targetNodeName) {
+    await this.reply(senderJid, `⏳ Mengambil data performa server *${targetNodeName}*...`);
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
+    let health, def;
+    if (isLocal) {
+      health = await security.getSystemHealth();
+      def = await security.getDefenderStatus();
+    } else {
+      health = await cluster.dispatchCommand(targetNodeId, 'status');
+      def = await cluster.dispatchCommand(targetNodeId, 'defender');
+    }
+
+    if (health?.error) {
+      return await this.reply(senderJid, `❌ Gagal mengambil status dari *${targetNodeName}*: ${health.error}`);
+    }
+
+    const driveStr = (health?.Drives || []).map(d => `  - Drive ${d.Name}: ${d.UsedGB} GB terpakai / ${d.TotalGB} GB (Sisa ${d.FreeGB} GB)`).join('\n');
+    const osHeader = health?.OS ? health.OS.toUpperCase() : (isLocal ? security.osName.toUpperCase() : 'SERVER');
+
+    const response = 
+`💻 *STATUS SERVER ${targetNodeName.toUpperCase()} (${osHeader})*
+-----------------------------------------
+• *Node ID:* \`${targetNodeId}\`
+• *Uptime:* ${health?.Uptime || 'N/A'}
+• *CPU Load:* ${health?.CPU || 0}%
+• *RAM Terpakai:* ${health?.UsedRamGB || 0} GB / ${health?.TotalRamGB || 0} GB (${health?.RamPercent || 0}%)
+• *Penyimpanan Disk:*
+${driveStr || '  - Tidak ada data drive'}
+
+🛡️ *${def?.Name || (security.isWindows ? 'Windows Defender' : 'Keamanan Linux')}:*
+• *Antivirus:* ${def?.AntivirusEnabled ? '✅ Aktif' : '❌ Nonaktif / Belum Terpasang'}
+• *Proteksi Real-Time:* ${def?.RealTimeProtection ? '✅ Aktif' : '❌ Nonaktif'}
+• *Engine Version:* ${def?.EngineVersion || 'N/A'}
+-----------------------------------------
+💡 Balas nomor (1-10) untuk tindakan lain, atau ketik *0* untuk ganti server.`;
+
+    return await this.reply(senderJid, response);
+  }
+
+  async executeServerThreats(senderJid, targetNodeId, targetNodeName) {
+    await this.reply(senderJid, `⏳ Memeriksa riwayat deteksi ancaman pada *${targetNodeName}*...`);
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
+    let threats;
+    if (isLocal) {
+      threats = await security.getRecentThreats(5);
+    } else {
+      threats = await cluster.dispatchCommand(targetNodeId, 'threats');
+    }
+
+    if (threats?.error) {
+      return await this.reply(senderJid, `❌ Gagal membaca riwayat ancaman: ${threats.error}`);
+    }
+
+    if (!threats || threats.length === 0) {
+      return await this.reply(
+        senderJid,
+        `✅ *Kondisi Bersih (${targetNodeName}):* Tidak ada ancaman virus atau malware aktif yang terdeteksi.\n\n💡 Balas nomor (1-10) untuk tindakan lain, atau ketik *0* untuk ganti server.`
+      );
+    }
+
+    let res = `🛡️ *ANCAMAN TERDETEKSI: ${targetNodeName.toUpperCase()} (${threats.length})*\n-----------------------------------------\n`;
+    threats.forEach((t, i) => {
+      res += `${i + 1}. *${t.ThreatName}*\n`;
+      res += `   • Waktu: ${t.Time}\n`;
+      res += `   • Status: ${t.Remediated ? '✅ Telah Diisolasi' : '⚠️ Masih Berbahaya'}\n`;
+      res += `   • Target: \`${t.Resources?.substring(0, 100) || 'N/A'}...\`\n\n`;
+    });
+    res += `-----------------------------------------\n`;
+    res += `💡 Balas nomor (1-10) untuk tindakan lain, atau ketik *0* untuk ganti server.`;
+    return await this.reply(senderJid, res);
+  }
+
+  async executeServerScan(senderJid, targetNodeId, targetNodeName, isFull = false) {
+    const scanType = isFull ? 'Full Scan' : 'Quick Scan';
+    await this.reply(senderJid, `🚀 Memulai *${scanType}* pada *${targetNodeName}* di latar belakang...`);
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
+    let res;
+    if (isLocal) {
+      res = isFull ? await security.startFullScan() : await security.startQuickScan();
+    } else {
+      res = await cluster.dispatchCommand(targetNodeId, isFull ? 'scan-full' : 'scan');
+    }
+
+    const msg = typeof res === 'string' ? res : (res?.error ? `❌ Gagal: ${res.error}` : JSON.stringify(res));
+    return await this.reply(
+      senderJid,
+      `✅ *${targetNodeName}:* ${msg}\nAnda akan menerima notifikasi jika ada virus yang ditemukan.\n\n💡 Balas nomor (1-10) untuk tindakan lain, atau ketik *0* untuk ganti server.`
+    );
+  }
+
+  async executeServerPorts(senderJid, targetNodeId, targetNodeName) {
+    await this.reply(senderJid, `⏳ Memindai port TCP aktif pada *${targetNodeName}*...`);
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
+    let ports;
+    if (isLocal) {
+      ports = await security.getListeningPorts();
+    } else {
+      ports = await cluster.dispatchCommand(targetNodeId, 'ports');
+    }
+
+    if (ports?.error) {
+      return await this.reply(senderJid, `❌ Gagal membaca port: ${ports.error}`);
+    }
+
+    if (!ports || ports.length === 0) {
+      return await this.reply(senderJid, `Tidak ada data port yang dapat diakses dari *${targetNodeName}*.\n\n💡 Ketik *0* untuk ganti server.`);
+    }
+
+    const importantPorts = ports.filter(p => [80, 443, 3000, 3001, 4000, 5005, 5432, 5433, 6380, 8080, 9090, 11434].includes(p.Port));
+    let out = `🔌 *PORT LAYANAN UTAMA: ${targetNodeName.toUpperCase()}*\n-----------------------------------------\n`;
+    if (importantPorts.length > 0) {
+      importantPorts.forEach(p => {
+        out += `• Port *${p.Port}* : ${p.Process} (PID: ${p.PID})\n`;
+      });
+    } else {
+      ports.slice(0, 10).forEach(p => {
+        out += `• Port *${p.Port}* : ${p.Process} (PID: ${p.PID})\n`;
+      });
+    }
+    out += `\nTotal port aktif di sistem: ${ports.length} port.`;
+    out += `\n-----------------------------------------`;
+    out += `\n💡 Balas nomor (1-10) untuk tindakan lain, atau ketik *0* untuk ganti server.`;
+    return await this.reply(senderJid, out);
+  }
+
+  async executeServerDocker(senderJid, targetNodeId, targetNodeName) {
+    await this.reply(senderJid, `⏳ Memeriksa kontainer Docker pada *${targetNodeName}*...`);
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
+    let status;
+    if (isLocal) {
+      status = await security.getDockerStatus();
+    } else {
+      const res = await cluster.dispatchCommand(targetNodeId, 'docker');
+      status = typeof res === 'string' ? res : (res?.error ? `❌ Gagal: ${res.error}` : JSON.stringify(res));
+    }
+
+    const out = 
+`🐳 *STATUS DOCKER CONTAINERS: ${targetNodeName.toUpperCase()}*
+-----------------------------------------
+${status}
+
+💡 Ketik *7 <nama_container>* untuk me-restart container.
+💡 Ketik *0* untuk ganti server.`;
+
+    return await this.reply(senderJid, out);
+  }
+
+  async showAllServersStatus(senderJid) {
+    await this.reply(senderJid, '⏳ Mengumpulkan data performa seluruh server di cluster...');
+    const reports = await cluster.aggregateStatus();
+    let out = `📊 *LAPORAN PERFORMA SELURUH SERVER*\n-----------------------------------------\n`;
+    for (const rep of reports) {
+      out += `• *${rep.name}* [${rep.status} - ${rep.role.toUpperCase()}]\n`;
+      if (rep.health && typeof rep.health.CPU !== 'undefined') {
+        out += `  - CPU: ${rep.health.CPU}% | RAM: ${rep.health.UsedRamGB} GB / ${rep.health.TotalRamGB} GB (${rep.health.RamPercent}%)\n`;
+        out += `  - Uptime: ${rep.health.Uptime || 'N/A'}\n`;
+      } else {
+        out += `  - Data: Tidak tersedia / Server offline\n`;
+      }
+      out += '\n';
+    }
+    out += `Total node terdaftar: ${reports.length} server.\n`;
+    out += `-----------------------------------------\n`;
+    out += `💡 Ketik *monitor* untuk memilih server spesifik.`;
+    return await this.reply(senderJid, out);
+  }
+
+  // =========================================================================
+  // PROCESS COMMAND (MAIN DISPATCHER)
+  // =========================================================================
+
   async processCommand(senderJid, text) {
     const raw = text.trim();
     const lower = raw.toLowerCase();
     const cleanSender = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-    // 1. Menu Perintah / Monitor
-    if (
-      lower === 'monitor' ||
-      lower === '!monitor' ||
-      lower === 'menu' ||
-      lower === '!menu' ||
-      lower === 'help' ||
-      lower === '!help' ||
-      lower === '1' ||
-      lower === '!1'
-    ) {
-      const menu = 
-`🛡️ *PANEL MONITORING & KEAMANAN SERVER* 🛡️
------------------------------------------
-Silakan balas dengan *NOMOR* atau *NAMA PERINTAH*:
-
-*1.* !help
-   ↳ Menampilkan menu bantuan dan daftar semua perintah.
-
-*2.* !status
-   ↳ Ringkasan pemakaian CPU, RAM (dari 64 GB), sisa Disk, Uptime, & Defender.
-
-*3.* !threats
-   ↳ Riwayat ancaman/virus yang pernah terdeteksi & diisolasi Defender.
-
-*4.* !scan
-   ↳ Memicu Quick Scan antivirus Windows Defender di latar belakang.
-
-*5.* !scan-full
-   ↳ Memicu Full Scan menyeluruh pada seluruh drive server.
-
-*6.* !ports
-   ↳ Memindai port TCP aktif (80, 443, 3001, 5432, 8080, 11434, dll.) & prosesnya.
-
-*7.* !docker
-   ↳ Cek status semua container Docker yang sedang berjalan.
-
-*8.* !docker restart <nama>
-   ↳ Me-restart container Docker tertentu.
-   _(Contoh: ketik *8 ujian_backend* atau cukup ketik *8*)_
-
-*9.* !block <IP>
-   ↳ Menambahkan aturan blokir IP langsung ke Firewall (${security.isWindows ? 'Windows Firewall' : 'UFW/IPTables'}).
-   _(Contoh: ketik *9 192.168.1.100* atau cukup ketik *9*)_
-
-*10.* !lockdown
-   ↳ Mode Darurat: Memutus Cloudflare Tunnel seketika jika diserang.
-
-*11.* !restore
-   ↳ Mengaktifkan kembali Cloudflare Tunnel ke domain kedukanaksara.com.
-
-*12.* !lock (atau *kunci*)
-   ↳ Kunci kembali sesi bot secara manual.
-
-🌐 *KONTROL MULTI-SERVER (CLUSTER & HA)*
-• *nodes* : Daftar semua server & statusnya
-• *all status* : Laporan kesehatan seluruh server
-• *node <id> <perintah>* : Kontrol server tertentu
------------------------------------------
-💡 *Cukup ketik nomornya saja (contoh: 2) untuk memilih.*`;
-      return await this.reply(senderJid, menu);
-    }
-
-    // 2. Status Server
-    if (lower === '2' || lower === '!2' || lower === '!status' || lower === 'status') {
-      await this.reply(senderJid, '⏳ Mengambil data performa dan kesehatan server...');
-      const health = await security.getSystemHealth();
-      const def = await security.getDefenderStatus();
-
-      const driveStr = (health.Drives || []).map(d => `  - Drive ${d.Name}: ${d.UsedGB} GB terpakai / ${d.TotalGB} GB (Sisa ${d.FreeGB} GB)`).join('\n');
-
-      const response = 
-`💻 *STATUS SERVER ${security.osName.toUpperCase()}*
------------------------------------------
-• *Uptime:* ${health.Uptime || 'N/A'}
-• *CPU Load:* ${health.CPU || 0}%
-• *RAM Terpakai:* ${health.UsedRamGB || 0} GB / ${health.TotalRamGB || 0} GB (${health.RamPercent || 0}%)
-• *Penyimpanan Disk:*
-${driveStr || '  - Tidak ada data drive'}
-
-🛡️ *${def.Name || (security.isWindows ? 'Windows Defender' : 'Keamanan Linux')}:*
-• *Antivirus:* ${def.AntivirusEnabled ? '✅ Aktif' : '❌ Nonaktif / Belum Terpasang'}
-• *Proteksi Real-Time:* ${def.RealTimeProtection ? '✅ Aktif' : '❌ Nonaktif'}
-• *Engine Version:* ${def.EngineVersion || 'N/A'}
------------------------------------------`;
-      return await this.reply(senderJid, response);
-    }
-
-    // 3. Riwayat Virus / Threats
-    if (lower === '3' || lower === '!3' || lower === '!threats' || lower === 'threats') {
-      await this.reply(senderJid, '⏳ Memeriksa riwayat deteksi Windows Defender...');
-      const threats = await security.getRecentThreats(5);
-      if (!threats || threats.length === 0) {
-        return await this.reply(senderJid, '✅ *Kondisi Bersih:* Tidak ada ancaman virus atau malware aktif yang terdeteksi.');
-      }
-
-      let res = `🛡️ *DAFTAR ANCAMAN TERDETEKSI (${threats.length})*\n-----------------------------------------\n`;
-      threats.forEach((t, i) => {
-        res += `${i + 1}. *${t.ThreatName}*\n`;
-        res += `   • Waktu: ${t.Time}\n`;
-        res += `   • Status: ${t.Remediated ? '✅ Telah Diisolasi' : '⚠️ Masih Berbahaya'}\n`;
-        res += `   • Target: \`${t.Resources?.substring(0, 100) || 'N/A'}...\`\n\n`;
-      });
-      res += `Ketik *4* atau *!scan* untuk memulai pembersihan mendalam.`;
-      return await this.reply(senderJid, res);
-    }
-
-    // 4. Quick Scan Antivirus
-    if (lower === '4' || lower === '!4' || lower === '!scan' || lower === 'scan') {
-      await this.reply(senderJid, '🚀 Memulai *Quick Scan* Windows Defender di latar belakang...');
-      const res = await security.startQuickScan();
-      return await this.reply(senderJid, `✅ ${res}\nAnda akan menerima notifikasi jika ada virus yang ditemukan.`);
-    }
-
-    // 5. Full Scan Antivirus
-    if (lower === '5' || lower === '!5' || lower === '!scan-full' || lower === 'scan full') {
-      await this.reply(senderJid, '🚀 Memulai *Full Scan* menyeluruh pada semua partisi Windows Defender...');
-      const res = await security.startFullScan();
-      return await this.reply(senderJid, `✅ ${res}\nProses ini memerlukan waktu lebih lama.`);
-    }
-
-    // 6. Cek Port Terbuka
-    if (lower === '6' || lower === '!6' || lower === '!ports' || lower === 'ports') {
-      await this.reply(senderJid, '⏳ Memindai port TCP yang sedang mendengar (LISTENING)...');
-      const ports = await security.getListeningPorts();
-      if (!ports || ports.length === 0) {
-        return await this.reply(senderJid, 'Tidak ada data port yang dapat diakses.');
-      }
-
-      const importantPorts = ports.filter(p => [80, 443, 3000, 3001, 4000, 5005, 5432, 5433, 6380, 8080, 9090, 11434].includes(p.Port));
-      let out = `🔌 *RINGKASAN PORT LAYANAN UTAMA*\n-----------------------------------------\n`;
-      importantPorts.forEach(p => {
-        out += `• Port *${p.Port}* : ${p.Process} (PID: ${p.PID})\n`;
-      });
-      out += `\nTotal port aktif di sistem: ${ports.length} port.`;
-      return await this.reply(senderJid, out);
-    }
-
-    // 7. Cek Docker
-    if (lower === '7' || lower === '!7' || lower === '!docker' || lower === 'docker') {
-      await this.reply(senderJid, '⏳ Memeriksa kontainer Docker...');
-      const status = await security.getDockerStatus();
-      return await this.reply(senderJid, `🐳 *STATUS DOCKER CONTAINERS*\n-----------------------------------------\n${status}\n\n💡 Ketik *8 <nama_container>* untuk me-restart container.`);
-    }
-
-    // 8. Restart Docker Container
-    if (lower === '8' || lower === '!8') {
-      const status = await security.getDockerStatus();
-      return await this.reply(
-        senderJid,
-        `🐳 *RESTART DOCKER CONTAINER*\nSilakan ketik nomor 8 diikuti nama container.\n*Contoh:* \`8 ujian_backend\`\n\n*Container yang aktif saat ini:*\n${status}`
-      );
-    }
-    if (lower.startsWith('8 ') || lower.startsWith('!8 ') || lower.startsWith('!docker restart ')) {
-      const parts = raw.replace(/^(!docker restart|!8|8)\s+/i, '').trim().split(/\s+/);
-      const containerName = parts[0];
-      const inlinePin = parts[1] || null;
-      return await this.requestPinOrExecute(
-        senderJid,
-        cleanSender,
-        'restart_docker',
-        containerName,
-        'Restart Docker Container',
-        containerName,
-        inlinePin
-      );
-    }
-
-    // 9. Blokir IP
-    if (lower === '9' || lower === '!9') {
-      return await this.reply(
-        senderJid,
-        `🧱 *BLOKIR IP DI FIREWALL*\nSilakan ketik nomor 9 diikuti alamat IP yang ingin diblokir.\n*Contoh:* \`9 192.168.1.100\` atau \`!block 192.168.1.100\``
-      );
-    }
-    if (lower.startsWith('9 ') || lower.startsWith('!9 ') || lower.startsWith('!block ')) {
-      const parts = raw.replace(/^(!block|!9|9)\s+/i, '').trim().split(/\s+/);
-      const ip = parts[0];
-      const inlinePin = parts[1] || null;
-      return await this.requestPinOrExecute(
-        senderJid,
-        cleanSender,
-        'block_ip',
-        ip,
-        'Blokir IP di Firewall',
-        ip,
-        inlinePin
-      );
-    }
-
-    // 10. Emergency Lockdown
-    if (
-      lower === '10' ||
-      lower === '!10' ||
-      lower === '!lockdown' ||
-      lower === 'lockdown' ||
-      lower.startsWith('10 ') ||
-      lower.startsWith('!10 ') ||
-      lower.startsWith('!lockdown ')
-    ) {
-      const parts = raw.split(/\s+/);
-      const inlinePin = parts.length > 1 ? parts[1] : null;
-      return await this.requestPinOrExecute(
-        senderJid,
-        cleanSender,
-        'lockdown',
-        null,
-        'Emergency Lockdown (Putus Akses Luar)',
-        'Cloudflare Tunnel',
-        inlinePin
-      );
-    }
-
-    // 11. Restore Tunnel
-    if (lower === '11' || lower === '!11' || lower === '!restore' || lower === 'restore') {
-      await this.reply(senderJid, '⏳ Mengaktifkan kembali Cloudflare Tunnel...');
-      const result = await security.restoreCloudflare();
-      return await this.reply(senderJid, `✅ ${result}`);
-    }
-
-    // 12. Manual Lock
-    if (lower === '12' || lower === '!12' || lower === 'lock' || lower === '!lock' || lower === 'kunci') {
+    // 1. Perintah KUNCI manual / Lock
+    if (lower === 'lock' || lower === '!lock' || lower === 'kunci' || lower === '12' || lower === '!12' || lower === 'l') {
       this.adminSessions.delete(cleanSender);
-      return await this.reply(senderJid, '🔒 *Sesi bot telah dikunci.* Masukkan PIN untuk membuka kembali.');
+      this.userMenuState.delete(cleanSender);
+      return await this.reply(senderJid, '🔒 *Sesi bot telah dikunci.* Masukkan PIN Anda untuk membuka kembali.');
     }
 
-    // 13. Cluster: Daftar Node Server
+    // 2. Perintah CLUSTER Global
     if (lower === 'nodes' || lower === 'servers' || lower === 'cluster' || lower === '!nodes' || lower === '!cluster') {
       let out = `🖥️ *STATUS CLUSTER & FLEET SERVER*\n-----------------------------------------\n`;
       for (const [id, node] of cluster.nodes.entries()) {
         const icon = node.status === 'online' ? '🟢' : '🔴';
-        out += `${icon} *${node.name}* (\`${id}\`)\n   • Peran: *${node.role.toUpperCase()}* | Status: ${node.status.toUpperCase()}\n`;
+        const isLocal = node.nodeId === config.nodeId ? ' (Server Ini)' : '';
+        out += `${icon} *${node.name}* (\`${id}\`)${isLocal}\n   • Peran: *${node.role.toUpperCase()}* | Status: ${node.status.toUpperCase()}\n`;
       }
-      out += `-----------------------------------------\n💡 Ketik *all status* untuk cek performa semua server.\n💡 Ketik *node <id> status* untuk cek server tertentu.`;
+      out += `-----------------------------------------\n💡 Ketik *monitor* untuk memilih server yang akan dikelola.\n💡 Ketik *all status* untuk cek performa semua server.`;
       return await this.reply(senderJid, out);
     }
 
-    // 14. Cluster: Status Seluruh Server (Aggregated Health)
-    if (lower === 'all status' || lower === 'status all' || lower === '!all status') {
-      await this.reply(senderJid, '⏳ Mengumpulkan data performa seluruh server di cluster...');
-      const reports = await cluster.aggregateStatus();
-      let out = `📊 *LAPORAN PERFORMA SELURUH SERVER*\n-----------------------------------------\n`;
-      for (const rep of reports) {
-        out += `• *${rep.name}* [${rep.status} - ${rep.role.toUpperCase()}]\n`;
-        if (rep.health && typeof rep.health.CPU !== 'undefined') {
-          out += `  - CPU: ${rep.health.CPU}% | RAM: ${rep.health.UsedRamGB} GB / ${rep.health.TotalRamGB} GB (${rep.health.RamPercent}%)\n`;
-          out += `  - Uptime: ${rep.health.Uptime || 'N/A'}\n`;
-        } else {
-          out += `  - Data: Tidak tersedia / Server offline\n`;
-        }
-        out += '\n';
-      }
-      out += `Total node terdaftar: ${reports.length} server.`;
-      return await this.reply(senderJid, out);
+    if (lower === 'all status' || lower === 'status all' || lower === '!all status' || lower === 'a') {
+      return await this.showAllServersStatus(senderJid);
     }
 
-    // 15. Cluster: Perintah Khusus Node (contoh: "node node-01 status")
     if (lower.startsWith('node ')) {
       const parts = raw.split(/\s+/);
       if (parts.length < 3) {
@@ -611,20 +654,185 @@ ${driveStr || '  - Tidak ada data drive'}
       return await this.reply(senderJid, `✅ Hasil dari *${targetId}*:\n\`\`\`${JSON.stringify(res, null, 2).substring(0, 800)}\`\`\``);
     }
 
-    // 16. Fallback AI Response via Ollama (jika pesan berupa pertanyaan santai/diskusi)
+    // 3. Trigger MENU UTAMA: Pemilihan Server
+    if (
+      lower === 'monitor' ||
+      lower === '!monitor' ||
+      lower === 'menu' ||
+      lower === '!menu' ||
+      lower === 'help' ||
+      lower === '!help' ||
+      lower === 'pilih server'
+    ) {
+      return await this.showServerSelectionMenu(senderJid, cleanSender);
+    }
+
+    // Ambil status menu user saat ini
+    const menuState = this.userMenuState.get(cleanSender);
+
+    // KASUS A: Pengguna sedang berada di menu PILIH SERVER (CHOOSE_SERVER)
+    if (menuState && menuState.step === 'CHOOSE_SERVER') {
+      const num = parseInt(raw, 10);
+      if (!isNaN(num) && num >= 1 && num <= menuState.serverList.length) {
+        const chosenNode = menuState.serverList[num - 1];
+        return await this.showServerActionsMenu(senderJid, cleanSender, chosenNode.nodeId);
+      }
+
+      // Cek jika mengetik langsung ID node (misal: "node-01")
+      const matchedNode = menuState.serverList.find(n => n.nodeId.toLowerCase() === lower);
+      if (matchedNode) {
+        return await this.showServerActionsMenu(senderJid, cleanSender, matchedNode.nodeId);
+      }
+
+      return await this.reply(
+        senderJid,
+        `⚠️ Pilihan nomor tidak valid.\nSilakan balas dengan angka *1* sampai *${menuState.serverList.length}* untuk memilih server, atau ketik *A* untuk melihat semua server.`
+      );
+    }
+
+    // KASUS B: Pengguna berada di menu TINDAKAN SERVER (SERVER_ACTIONS) atau Eksekusi Langsung
+    let targetNodeId = menuState?.targetNodeId || config.nodeId;
+    let targetNode = cluster.nodes.get(targetNodeId) || {
+      nodeId: targetNodeId,
+      name: config.nodeName,
+      role: config.clusterRole,
+      status: 'online'
+    };
+    let targetNodeName = targetNode.name;
+
+    // Tombol KEMBALI / Ganti Server
+    if (lower === '0' || lower === '!0' || lower === 'kembali' || lower === 'back' || lower === 'ganti' || lower === 'ganti server') {
+      return await this.showServerSelectionMenu(senderJid, cleanSender);
+    }
+
+    // 1. Status Server
+    if (lower === '1' || lower === '!1' || lower === '!status' || lower === 'status') {
+      return await this.executeServerStatus(senderJid, targetNodeId, targetNodeName);
+    }
+
+    // 2. Riwayat Ancaman / Threats
+    if (lower === '2' || lower === '!2' || lower === '!threats' || lower === 'threats') {
+      return await this.executeServerThreats(senderJid, targetNodeId, targetNodeName);
+    }
+
+    // 3. Quick Scan Antivirus
+    if (lower === '3' || lower === '!3' || lower === '!scan' || lower === 'scan') {
+      return await this.executeServerScan(senderJid, targetNodeId, targetNodeName, false);
+    }
+
+    // 4. Full Scan Antivirus
+    if (lower === '4' || lower === '!4' || lower === '!scan-full' || lower === 'scan full') {
+      return await this.executeServerScan(senderJid, targetNodeId, targetNodeName, true);
+    }
+
+    // 5. Cek Port Terbuka
+    if (lower === '5' || lower === '!5' || lower === '!ports' || lower === 'ports') {
+      return await this.executeServerPorts(senderJid, targetNodeId, targetNodeName);
+    }
+
+    // 6. Cek Docker
+    if (lower === '6' || lower === '!6' || lower === '!docker' || lower === 'docker') {
+      return await this.executeServerDocker(senderJid, targetNodeId, targetNodeName);
+    }
+
+    // 7. Restart Docker Container
+    if (lower === '7' || lower === '!7') {
+      return await this.reply(
+        senderJid,
+        `🐳 *RESTART DOCKER CONTAINER (${targetNodeName})*\nSilakan ketik nomor 7 diikuti nama container.\n*Contoh:* \`7 ujian_backend\` atau \`!docker restart ujian_backend\``
+      );
+    }
+    if (lower.startsWith('7 ') || lower.startsWith('!7 ') || lower.startsWith('!docker restart ')) {
+      const parts = raw.replace(/^(!docker restart|!7|7)\s+/i, '').trim().split(/\s+/);
+      const containerName = parts[0];
+      const inlinePin = parts[1] || null;
+      return await this.requestPinOrExecute(
+        senderJid,
+        cleanSender,
+        'restart_docker',
+        containerName,
+        `Restart Docker Container (${targetNodeName})`,
+        containerName,
+        inlinePin,
+        targetNodeId
+      );
+    }
+
+    // 8. Blokir IP
+    if (lower === '8' || lower === '!8') {
+      return await this.reply(
+        senderJid,
+        `🧱 *BLOKIR IP DI FIREWALL (${targetNodeName})*\nSilakan ketik nomor 8 diikuti alamat IP yang ingin diblokir.\n*Contoh:* \`8 192.168.1.100\` atau \`!block 192.168.1.100\``
+      );
+    }
+    if (lower.startsWith('8 ') || lower.startsWith('!8 ') || lower.startsWith('!block ')) {
+      const parts = raw.replace(/^(!block|!8|8)\s+/i, '').trim().split(/\s+/);
+      const ip = parts[0];
+      const inlinePin = parts[1] || null;
+      return await this.requestPinOrExecute(
+        senderJid,
+        cleanSender,
+        'block_ip',
+        ip,
+        `Blokir IP di Firewall (${targetNodeName})`,
+        ip,
+        inlinePin,
+        targetNodeId
+      );
+    }
+
+    // 9. Emergency Lockdown
+    if (
+      lower === '9' ||
+      lower === '!9' ||
+      lower === '!lockdown' ||
+      lower === 'lockdown' ||
+      lower.startsWith('9 ') ||
+      lower.startsWith('!9 ') ||
+      lower.startsWith('!lockdown ')
+    ) {
+      const parts = raw.split(/\s+/);
+      const inlinePin = parts.length > 1 ? parts[1] : null;
+      return await this.requestPinOrExecute(
+        senderJid,
+        cleanSender,
+        'lockdown',
+        null,
+        `Emergency Lockdown (${targetNodeName})`,
+        'Cloudflare Tunnel',
+        inlinePin,
+        targetNodeId
+      );
+    }
+
+    // 10. Restore Tunnel
+    if (lower === '10' || lower === '!10' || lower === '!restore' || lower === 'restore') {
+      await this.reply(senderJid, `⏳ Mengaktifkan kembali Cloudflare Tunnel pada *${targetNodeName}*...`);
+      const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+      let result;
+      if (isLocal) {
+        result = await security.restoreCloudflare();
+      } else {
+        const res = await cluster.dispatchCommand(targetNodeId, 'restore');
+        result = typeof res === 'string' ? res : (res?.error ? `❌ Gagal: ${res.error}` : JSON.stringify(res));
+      }
+      return await this.reply(senderJid, `✅ ${result}\n\n💡 Ketik *0* untuk ganti server.`);
+    }
+
+    // 16. Fallback AI Response via Ollama
     await this.replyWithAI(senderJid, text);
   }
 
-  async requestPinOrExecute(senderJid, cleanSender, action, target, title, desc, inlinePin) {
+  async requestPinOrExecute(senderJid, cleanSender, action, target, title, desc, inlinePin, targetNodeId = null) {
     if (!config.requirePin) {
-      return await this.executeAction(senderJid, action, target);
+      return await this.executeAction(senderJid, action, target, targetNodeId);
     }
 
     // Jika admin menyertakan PIN langsung (inline)
     if (inlinePin) {
       if (inlinePin === config.securityPin) {
         await this.reply(senderJid, '🔑 PIN terverifikasi. Mengeksekusi...');
-        return await this.executeAction(senderJid, action, target);
+        return await this.executeAction(senderJid, action, target, targetNodeId);
       } else {
         return await this.reply(senderJid, '❌ PIN keamanan salah! Tindakan dibatalkan.');
       }
@@ -634,6 +842,7 @@ ${driveStr || '  - Tidak ada data drive'}
     this.pendingActions.set(cleanSender, {
       action,
       target,
+      targetNodeId,
       expiresAt: Date.now() + 60000
     });
 
@@ -651,28 +860,48 @@ _Konfirmasi berlaku 60 detik. Ketik *batal* untuk batalkan._
     return await this.reply(senderJid, msg);
   }
 
-  async executeAction(senderJid, action, target) {
+  async executeAction(senderJid, action, target, targetNodeId = null) {
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
     if (action === 'restart_docker') {
       await this.reply(senderJid, `⏳ Merestart container *${target}*...`);
-      const result = await security.restartDockerContainer(target);
+      let result;
+      if (isLocal) {
+        result = await security.restartDockerContainer(target);
+      } else {
+        const res = await cluster.dispatchCommand(targetNodeId, 'docker-restart', { container: target });
+        result = res?.error ? `❌ Gagal: ${res.error}` : (typeof res === 'string' ? res : JSON.stringify(res));
+      }
       return await this.reply(senderJid, result);
     }
     if (action === 'block_ip') {
       await this.reply(senderJid, `🧱 Menerapkan aturan blokir untuk IP *${target}* di Firewall...`);
-      const result = await security.blockIp(target);
+      let result;
+      if (isLocal) {
+        result = await security.blockIp(target);
+      } else {
+        const res = await cluster.dispatchCommand(targetNodeId, 'block-ip', { ip: target });
+        result = res?.error ? `❌ Gagal: ${res.error}` : (typeof res === 'string' ? res : JSON.stringify(res));
+      }
       return await this.reply(senderJid, `🛡️ ${result}`);
     }
     if (action === 'lockdown') {
       await this.reply(senderJid, '🚨 Menjalankan protokol EMERGENSI: Memutus Cloudflare Tunnel...');
-      const result = await security.emergencyLockdown();
-      return await this.reply(senderJid, `${result}\nUntuk mengaktifkan kembali, ketik *11* atau *!restore*.`);
+      let result;
+      if (isLocal) {
+        result = await security.emergencyLockdown();
+      } else {
+        const res = await cluster.dispatchCommand(targetNodeId, 'lockdown');
+        result = res?.error ? `❌ Gagal: ${res.error}` : (typeof res === 'string' ? res : JSON.stringify(res));
+      }
+      return await this.reply(senderJid, `${result}\nUntuk mengaktifkan kembali, ketik *10* atau *!restore*.`);
     }
   }
 
   async replyWithAI(senderJid, userQuestion) {
     try {
       const health = await security.getSystemHealth();
-      const prompt = `Anda adalah SysAdmin & Security Guard Agent cerdas untuk server Windows ini.
+      const prompt = `Anda adalah SysAdmin & Security Guard Agent cerdas untuk server ini.
 Kondisi server saat ini:
 - CPU: ${health.CPU}%
 - RAM: ${health.UsedRamGB}GB / ${health.TotalRamGB}GB
@@ -680,7 +909,7 @@ Kondisi server saat ini:
 
 Pertanyaan Admin: "${userQuestion}"
 
-Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika memerlukan tindakan sistem, sarankan perintah yang sesuai (seperti !status, !scan, !threats, !ports, !docker).`;
+Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika memerlukan tindakan sistem, sarankan perintah yang sesuai (seperti monitor, 1 untuk status, 2 untuk threats, dll).`;
 
       const response = await fetch(`${config.ollamaUrl}/api/generate`, {
         method: 'POST',
@@ -705,7 +934,7 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
     // Standby fallback
     await this.reply(
       senderJid,
-      `🤖 Perintah tidak dikenali. Ketik *!help* untuk melihat daftar kendali yang tersedia, atau ketik *!status* untuk cek server.`
+      `🤖 Perintah tidak dikenali. Ketik *monitor* untuk memilih server dan melihat daftar kendali, atau ketik *0* untuk ganti server.`
     );
   }
 
@@ -735,4 +964,3 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
 }
 
 module.exports = WhatsAppClient;
-
