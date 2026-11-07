@@ -17,6 +17,46 @@ async function main() {
   const waClient = new WhatsAppClient();
   const watcher = new SecurityWatcher(waClient);
 
+  // Hook otomatis untuk meneruskan event cluster ke WhatsApp Admin
+  cluster.onClusterAlert = async (alertData) => {
+    const fullMsg = 
+`🚨 *PERINGATAN ANCAMAN DARI WORKER NODE!* 🚨
+-----------------------------------------
+• *Node:* ${alertData.nodeName || alertData.nodeId} (${alertData.nodeId})
+• *Waktu Deteksi:* ${new Date().toLocaleString('id-ID')}
+-----------------------------------------
+${alertData.message}`;
+    await waClient.broadcastToAdmins(fullMsg);
+  };
+
+  cluster.onNodeStatusChange = async (event) => {
+    if (event.status === 'offline') {
+      const offlineMsg = 
+`⚠️ *PERINGATAN KRITIKAL: NODE SERVER DOWN!* ⚠️
+-----------------------------------------
+• *Node:* ${event.name} (${event.nodeId})
+• *Role:* ${event.role.toUpperCase()}
+• *Alamat / URL:* ${event.url}
+• *Status:* ❌ OFFLINE (Tidak Merespons)
+• *Waktu Terdeteksi:* ${new Date().toLocaleString('id-ID')}
+• *Penyebab:* Detak jantung (heartbeat) terputus >35 detik. Kemungkinan server mati mendadak, OS crash, atau jaringan terputus.
+-----------------------------------------
+Ketik *nodes* atau *all status* untuk cek status armada server.`;
+      await waClient.broadcastToAdmins(offlineMsg);
+    } else if (event.status === 'online') {
+      const onlineMsg = 
+`✅ *PEMULIHAN: NODE SERVER KEMBALI ONLINE* ✅
+-----------------------------------------
+• *Node:* ${event.name} (${event.nodeId})
+• *Role:* ${event.role.toUpperCase()}
+• *Status:* 🟢 ONLINE & SIAP OPERASIONAL
+• *Waktu Pulih:* ${new Date().toLocaleString('id-ID')}
+-----------------------------------------
+Koneksi detak jantung dengan Master Koordinator telah kembali normal.`;
+      await waClient.broadcastToAdmins(onlineMsg);
+    }
+  };
+
   // 1. Jika node adalah WORKER murni:
   if (config.clusterRole === 'worker') {
     waClient.startQrWebServer(); // Membuka HTTP Server untuk cluster endpoint
@@ -35,13 +75,7 @@ async function main() {
     };
     cluster.onFailoverAlert = async (alertMsg) => {
       setTimeout(async () => {
-        if (waClient.sock) {
-          for (const admin of config.adminNumbers) {
-            try {
-              await waClient.sock.sendMessage(`${admin}@s.whatsapp.net`, { text: alertMsg });
-            } catch {}
-          }
-        }
+        await waClient.broadcastToAdmins(alertMsg);
       }, 5000);
     };
     await cluster.start();

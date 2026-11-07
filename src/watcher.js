@@ -67,13 +67,14 @@ class SecurityWatcher {
         const alertMessage = 
 `🚨 *PERINGATAN VIRUS/MALWARE BARU!* 🚨
 --------------------------------------
+• *Server/Node:* ${config.nodeName} (${config.nodeId})
 • *Ancaman:* ${t.ThreatName}
 • *Waktu:* ${t.Time}
 • *Status:* ${t.Remediated ? '✅ Telah Diisolasi / Karantina' : '⚠️ BUTUH TINDAKAN!'}
 • *Path / Target:* 
 \`\`\`${t.Resources}\`\`\`
 --------------------------------------
-Ketik *!threats* untuk riwayat lengkap.`;
+Ketik *threats* atau *node ${config.nodeId} threats* untuk riwayat lengkap.`;
 
         await this.broadcastAlert(alertMessage);
       }
@@ -93,11 +94,12 @@ Ketik *!threats* untuk riwayat lengkap.`;
         const msg = 
 `⚠️ *PERINGATAN RESOURCE TINGGI* ⚠️
 --------------------------------------
+• *Server/Node:* ${config.nodeName} (${config.nodeId})
 • *Beban CPU:* ${health.CPU}%
 • *Penggunaan RAM:* ${health.UsedRamGB} GB / ${health.TotalRamGB} GB (${health.RamPercent}%)
 • *Uptime:* ${health.Uptime}
 --------------------------------------
-Ketik *!status* untuk cek proses aktif.`;
+Ketik *status* atau *node ${config.nodeId} status* untuk cek proses aktif.`;
 
         await this.broadcastAlert(msg);
       }
@@ -108,7 +110,14 @@ Ketik *!status* untuk cek proses aktif.`;
 
   async broadcastAlert(message) {
     console.log(`[🔔 Security Alert]\n${message}`);
-    if (!this.wa || !this.wa.sock) return;
+    if (!this.wa || !this.wa.sock) {
+      // Jika node ini adalah worker/standby tanpa WA socket aktif, teruskan alert ke Master
+      if (config.clusterRole !== 'master') {
+        const cluster = require('./cluster');
+        await cluster.sendAlertToMaster(message, 'SECURITY_ALERT');
+      }
+      return;
+    }
 
     for (const adminNumber of config.adminNumbers) {
       try {

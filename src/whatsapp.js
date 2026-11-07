@@ -717,6 +717,21 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
       console.error(`[WA] Gagal membalas ke ${jid}:`, err.message);
     }
   }
+
+  async broadcastToAdmins(message) {
+    if (!this.sock) {
+      console.warn('[WA Broadcast] Tidak dapat mengirim pesan: WhatsApp sock belum siap.');
+      return;
+    }
+    for (const adminNumber of config.adminNumbers) {
+      try {
+        const jid = `${adminNumber}@s.whatsapp.net`;
+        await this.sock.sendMessage(jid, { text: message });
+      } catch (err) {
+        console.error(`[WA Broadcast] Gagal kirim notif ke ${adminNumber}:`, err.message);
+      }
+    }
+  }
 }
 
 module.exports = WhatsAppClient;

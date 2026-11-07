@@ -11,6 +11,8 @@ class ClusterManager {
     this.consecutiveFailures = 0;
     this.onPromoteToMaster = null;
     this.onFailoverAlert = null;
+    this.onClusterAlert = null;
+    this.onNodeStatusChange = null;
   }
 
   init(httpServer) {
@@ -115,8 +117,24 @@ class ClusterManager {
         if (url === '/api/cluster/heartbeat') {
           if (this.nodes.has(data.nodeId)) {
             const node = this.nodes.get(data.nodeId);
+            const wasOffline = node.status === 'offline';
             node.status = 'online';
             node.lastSeen = Date.now();
+
+            if (wasOffline && typeof this.onNodeStatusChange === 'function') {
+              try {
+                await this.onNodeStatusChange({
+                  nodeId: data.nodeId,
+                  name: node.name,
+                  role: node.role,
+                  url: node.url,
+                  status: 'online',
+                  lastSeen: node.lastSeen
+                });
+              } catch (err) {
+                console.error('[Cluster] Gagal callback onNodeStatusChange online:', err.message);
+              }
+            }
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
@@ -129,6 +147,21 @@ class ClusterManager {
           const result = await this.executeLocalSecurityCommand(command, params);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ success: true, result }));
+        }
+
+        // 4. Menerima Laporan Serangan / Alert Keamanan dari Worker ke Master
+        if (url === '/api/cluster/alert') {
+          const { nodeId, nodeName, alertType, message } = data;
+          console.log(`[🚨 Cluster Alert Received] Node: ${nodeName || nodeId} (${nodeId}) | Tipe: ${alertType || 'ALERT'}`);
+          if (typeof this.onClusterAlert === 'function') {
+            try {
+              await this.onClusterAlert({ nodeId, nodeName, alertType, message });
+            } catch (err) {
+              console.error('[Cluster] Gagal callback onClusterAlert:', err.message);
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: true, message: 'Alert diterima Master dan diteruskan ke WhatsApp' }));
         }
 
         res.writeHead(404);
@@ -167,7 +200,7 @@ class ClusterManager {
    * Pengawasan Master terhadap node worker (cek timeout)
    */
   startMasterWatcher() {
-    setInterval(() => {
+    setInterval(async () => {
       const now = Date.now();
       for (const [id, node] of this.nodes.entries()) {
         if (id === config.nodeId) continue;
@@ -175,9 +208,42 @@ class ClusterManager {
         if (now - node.lastSeen > 35000 && node.status === 'online') {
           node.status = 'offline';
           console.log(`[⚠️ Cluster Warning] Node ${node.name} (${id}) tidak merespons. Status: OFFLINE.`);
+          if (typeof this.onNodeStatusChange === 'function') {
+            try {
+              await this.onNodeStatusChange({
+                nodeId: id,
+                name: node.name,
+                role: node.role,
+                url: node.url,
+                status: 'offline',
+                lastSeen: node.lastSeen
+              });
+            } catch (err) {
+              console.error('[Cluster] Gagal callback onNodeStatusChange offline:', err.message);
+            }
+          }
         }
       }
     }, 10000);
+  }
+
+  /**
+   * Mengirimkan notifikasi insiden serangan / overload dari Worker ke Master Koordinator
+   */
+  async sendAlertToMaster(message, alertType = 'SECURITY_ALERT') {
+    if (this.role === 'master') return;
+    try {
+      await this.postJson(`${config.masterUrl}/api/cluster/alert`, {
+        nodeId: config.nodeId,
+        nodeName: config.nodeName,
+        alertType,
+        message,
+        timestamp: Date.now()
+      });
+      console.log(`[🌐 Cluster] Alert berhasil diteruskan ke Master (${config.masterUrl})`);
+    } catch (err) {
+      console.error(`[🌐 Cluster] Gagal meneruskan alert ke Master: ${err.message}`);
+    }
   }
 
   /**
@@ -417,3 +483,4 @@ class ClusterManager {
 
 const clusterService = new ClusterManager();
 module.exports = clusterService;
+
