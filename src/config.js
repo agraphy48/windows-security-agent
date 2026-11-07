@@ -36,6 +36,10 @@ const config = {
   nodeName: process.env.NODE_NAME || 'Server Utama (Windows)',
   clusterPort: parseInt(process.env.CLUSTER_PORT || '5005', 10),
   masterUrl: rawMasterUrl,
+  knownWorkers: (process.env.KNOWN_WORKERS || '')
+    .split(',')
+    .map(w => w.trim())
+    .filter(Boolean),
   clusterSecret: process.env.CLUSTER_SECRET || 'secops-cluster-token-secret-2026',
   failoverTimeoutSeconds: parseInt(process.env.FAILOVER_TIMEOUT_SECONDS || '30', 10),
 

@@ -52,6 +52,7 @@ class ClusterManager {
     });
 
     if (this.role === 'master') {
+      await this.discoverKnownWorkers();
       this.startMasterWatcher();
     } else if (this.role === 'standby') {
       await this.registerWithMaster();
@@ -245,14 +246,82 @@ class ClusterManager {
   }
 
   /**
-   * Pengawasan Master terhadap node worker (cek timeout)
+   * Menghubungi dan mendaftarkan worker yang telah ditentukan di KNOWN_WORKERS (Dual-Direction Discovery)
+   */
+  async discoverKnownWorkers() {
+    if (!config.knownWorkers || config.knownWorkers.length === 0) return;
+    for (const rawUrl of config.knownWorkers) {
+      let workerUrl = rawUrl.trim();
+      if (!/^https?:\/\//i.test(workerUrl)) {
+        workerUrl = `http://${workerUrl}`;
+      }
+      workerUrl = workerUrl.replace(/\/+$/, '');
+
+      try {
+        const res = await this.getJson(`${workerUrl}/api/cluster/ping`, 4000);
+        if (res && res.status === 'ok') {
+          const nodeId = res.nodeId || 'node-02';
+          const name = res.name || 'Server Worker';
+          const existing = this.nodes.get(nodeId);
+          if (!existing || existing.status !== 'online') {
+            this.nodes.set(nodeId, {
+              nodeId,
+              name,
+              role: res.role || 'worker',
+              url: workerUrl,
+              status: 'online',
+              lastSeen: Date.now()
+            });
+            console.log(`[🌐 Cluster] Worker "${name}" (${nodeId}) berhasil terhubung & didaftarkan dari ${workerUrl}`);
+          }
+        }
+      } catch (err) {
+        // Hanya log jika belum pernah terdaftar
+        // console.warn(`[Cluster] Belum dapat terhubung ke ${workerUrl}: ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Pengawasan Master terhadap node worker (cek timeout & active health poll)
    */
   startMasterWatcher() {
     setInterval(async () => {
+      // 1. Coba hubungkan ulang worker yang belum terdaftar / offline dari KNOWN_WORKERS
+      await this.discoverKnownWorkers();
+
       const now = Date.now();
       for (const [id, node] of this.nodes.entries()) {
         if (id === config.nodeId) continue;
-        // Jika tidak ada detak jantung selama 35 detik, tandai OFFLINE
+
+        // 2. Active health probe untuk remote worker (terutama VPS publik yang dapat diakses Master)
+        if (node.url && !node.url.includes('localhost') && !node.url.includes('127.0.0.1')) {
+          try {
+            const pingRes = await this.getJson(`${node.url}/api/cluster/ping`, 3500);
+            if (pingRes && pingRes.status === 'ok') {
+              const wasOffline = node.status === 'offline';
+              node.status = 'online';
+              node.lastSeen = Date.now();
+              if (wasOffline && typeof this.onNodeStatusChange === 'function') {
+                try {
+                  await this.onNodeStatusChange({
+                    nodeId: id,
+                    name: node.name,
+                    role: node.role,
+                    url: node.url,
+                    status: 'online',
+                    lastSeen: node.lastSeen
+                  });
+                } catch {}
+              }
+              continue;
+            }
+          } catch {
+            // Ping gagal, lanjutkan ke pengecekan timeout di bawah
+          }
+        }
+
+        // 3. Jika tidak ada respons selama >35 detik, tandai OFFLINE
         if (now - node.lastSeen > 35000 && node.status === 'online') {
           node.status = 'offline';
           console.log(`[⚠️ Cluster Warning] Node ${node.name} (${id}) tidak merespons. Status: OFFLINE.`);
