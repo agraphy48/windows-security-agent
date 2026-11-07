@@ -24,3 +24,4 @@ if [ ! -f ".env" ]; then
 fi
 
 node src/index.js
+
