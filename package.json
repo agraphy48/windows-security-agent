@@ -1,0 +1,17 @@
+{
+  "name": "windows-security-agent",
+  "version": "1.0.0",
+  "description": "WhatsApp-controlled Windows Security & Health Agent",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.19",
+    "dotenv": "^16.4.7",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0",
+    "qrcode": "^1.5.4"
+  }
+}
+
