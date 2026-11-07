@@ -1,0 +1,19 @@
+[Unit]
+Description=Server Security Guard Agent (WhatsApp Control)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/security-agent
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+
+# Security sandbox
+ProtectHome=false
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

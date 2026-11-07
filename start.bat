@@ -21,3 +21,4 @@ if not exist .env (
 
 node src/index.js
 pause
+

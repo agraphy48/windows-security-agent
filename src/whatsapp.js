@@ -243,7 +243,7 @@ Silakan balas dengan *NOMOR* atau *NAMA PERINTAH*:
    _(Contoh: ketik *8 ujian_backend* atau cukup ketik *8*)_
 
 *9.* !block <IP>
-   ↳ Menambahkan aturan blokir IP langsung ke Windows Firewall.
+   ↳ Menambahkan aturan blokir IP langsung ke Firewall (${security.isWindows ? 'Windows Firewall' : 'UFW/IPTables'}).
    _(Contoh: ketik *9 192.168.1.100* atau cukup ketik *9*)_
 
 *10.* !lockdown
@@ -265,7 +265,7 @@ Silakan balas dengan *NOMOR* atau *NAMA PERINTAH*:
       const driveStr = (health.Drives || []).map(d => `  - Drive ${d.Name}: ${d.UsedGB} GB terpakai / ${d.TotalGB} GB (Sisa ${d.FreeGB} GB)`).join('\n');
 
       const response = 
-`💻 *STATUS SERVER WINDOWS*
+`💻 *STATUS SERVER ${security.osName.toUpperCase()}*
 -----------------------------------------
 • *Uptime:* ${health.Uptime || 'N/A'}
 • *CPU Load:* ${health.CPU || 0}%
@@ -273,10 +273,9 @@ Silakan balas dengan *NOMOR* atau *NAMA PERINTAH*:
 • *Penyimpanan Disk:*
 ${driveStr || '  - Tidak ada data drive'}
 
-🛡️ *Windows Defender:*
-• *Antivirus:* ${def.AntivirusEnabled ? '✅ Aktif' : '❌ Nonaktif'}
-• *Real-Time Protection:* ${def.RealTimeProtection ? '✅ Aktif' : '❌ Nonaktif'}
-• *Quick Scan Terakhir:* ${def.QuickScanAgeDays >= 0 ? `${def.QuickScanAgeDays} hari lalu` : 'Baru saja / Sedang berjalan'}
+🛡️ *${def.Name || (security.isWindows ? 'Windows Defender' : 'Keamanan Linux')}:*
+• *Antivirus:* ${def.AntivirusEnabled ? '✅ Aktif' : '❌ Nonaktif / Belum Terpasang'}
+• *Proteksi Real-Time:* ${def.RealTimeProtection ? '✅ Aktif' : '❌ Nonaktif'}
 • *Engine Version:* ${def.EngineVersion || 'N/A'}
 -----------------------------------------`;
       return await this.reply(senderJid, response);
