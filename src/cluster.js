@@ -85,6 +85,15 @@ class ClusterManager {
       }));
     }
 
+    if (req.method === 'GET' && url === '/api/cluster/nodes') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        master: config.nodeId,
+        total: this.nodes.size,
+        nodes: Array.from(this.nodes.values())
+      }));
+    }
+
     if (req.method === 'POST') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -99,18 +108,42 @@ class ClusterManager {
             return res.end(JSON.stringify({ error: 'Hanya node Master yang menerima registrasi' }));
           }
 
-          this.nodes.set(data.nodeId, {
-            nodeId: data.nodeId,
-            name: data.name || data.nodeId,
+          let finalNodeId = data.nodeId || 'node-02';
+          let finalName = data.name || data.nodeId || 'Server Worker';
+
+          // Jika node yang mendaftar memiliki ID yang SAMA dengan Master atau sudah dipakai node lain yang beda URL:
+          const isSameAsMaster = finalNodeId === config.nodeId;
+          const isConflictWithExisting = this.nodes.has(finalNodeId) && this.nodes.get(finalNodeId).url !== data.url;
+
+          if (isSameAsMaster || isConflictWithExisting) {
+            let nextIndex = 2;
+            while (this.nodes.has(`node-0${nextIndex}`) || this.nodes.has(`node-${nextIndex}`)) {
+              nextIndex++;
+            }
+            finalNodeId = `node-0${nextIndex}`;
+            if (!data.name || data.name === config.nodeName || data.name === 'Server Utama' || data.name === 'Server VPS (AlmaLinux)') {
+              finalName = `Server Node ${nextIndex}`;
+            }
+            console.warn(`[⚠️ Cluster ID Duplikat] Node dari ${data.url || 'remote'} menggunakan ID yang sama ('${data.nodeId}'). Dialokasikan otomatis menjadi ID unik: '${finalNodeId}', Nama: '${finalName}'`);
+          }
+
+          this.nodes.set(finalNodeId, {
+            nodeId: finalNodeId,
+            name: finalName,
             role: data.role || 'worker',
             url: data.url,
             status: 'online',
             lastSeen: Date.now()
           });
 
-          console.log(`[🌐 Cluster] Node terdaftar: ${data.name} (${data.nodeId}) sebagai ${data.role}`);
+          console.log(`[🌐 Cluster] Node terdaftar: ${finalName} (${finalNodeId}) sebagai ${data.role || 'worker'}`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ success: true, message: 'Node berhasil terdaftar di cluster' }));
+          return res.end(JSON.stringify({
+            success: true,
+            message: 'Node berhasil terdaftar di cluster',
+            nodeId: finalNodeId,
+            name: finalName
+          }));
         }
 
         // 2. Heartbeat dari node
@@ -135,9 +168,13 @@ class ClusterManager {
                 console.error('[Cluster] Gagal callback onNodeStatusChange online:', err.message);
               }
             }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
+          } else {
+            // Beri sinyal ke worker untuk registrasi ulang
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ status: 'not_registered', message: 'Silakan registrasi ulang ke Master' }));
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
         }
 
         // 3. Eksekusi perintah remote dari Master ke Worker
@@ -252,9 +289,13 @@ class ClusterManager {
   startWorkerHeartbeat() {
     this.heartbeatInterval = setInterval(async () => {
       try {
-        await this.postJson(`${config.masterUrl}/api/cluster/heartbeat`, {
+        const res = await this.postJson(`${config.masterUrl}/api/cluster/heartbeat`, {
           nodeId: config.nodeId
         });
+        if (res && res.status === 'not_registered') {
+          console.log('[Worker Heartbeat] Master baru saja restart atau belum mendata node ini. Mendaftarkan ulang...');
+          await this.registerWithMaster();
+        }
       } catch (err) {
         console.error(`[Worker Heartbeat Failed] Tidak dapat menghubungi Master: ${err.message}`);
       }
@@ -327,13 +368,18 @@ class ClusterManager {
 
   async registerWithMaster() {
     try {
-      await this.postJson(`${config.masterUrl}/api/cluster/register`, {
+      const response = await this.postJson(`${config.masterUrl}/api/cluster/register`, {
         nodeId: config.nodeId,
         name: config.nodeName,
         role: this.role,
         url: `http://localhost:${config.clusterPort}`
       });
-      console.log(`[🌐 Cluster] Berhasil terhubung dan terdaftar di Master (${config.masterUrl})`);
+      if (response && response.nodeId && response.nodeId !== config.nodeId) {
+        console.log(`[🌐 Cluster] Master mengalokasikan Node ID baru: ${response.nodeId} (sebelumnya: ${config.nodeId})`);
+        config.nodeId = response.nodeId;
+        if (response.name) config.nodeName = response.name;
+      }
+      console.log(`[🌐 Cluster] Berhasil terhubung dan terdaftar di Master (${config.masterUrl}) sebagai ${config.nodeId}`);
     } catch (err) {
       console.error(`[🌐 Cluster] Gagal mendaftar ke Master: ${err.message}. Akan mencoba lagi secara berkala.`);
     }
