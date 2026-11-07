@@ -66,10 +66,14 @@ class ClusterManager {
    */
   async handleClusterApi(req, res) {
     const url = req.url.split('?')[0];
+    const clientIp = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'unknown';
     const authHeader = req.headers['x-cluster-secret'];
+
+    console.log(`[🌐 Cluster API] ${req.method} ${url} dari IP: ${clientIp}`);
 
     // Verifikasi Token Rahasia Cluster
     if (authHeader !== config.clusterSecret) {
+      console.warn(`[⚠️ Cluster Auth Ditolak] Token salah dari IP ${clientIp}. Header: "${authHeader}" (Dibutuhkan: "${config.clusterSecret}")`);
       res.writeHead(403, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'Akses cluster ditolak: Token tidak valid' }));
     }
@@ -111,9 +115,15 @@ class ClusterManager {
           let finalNodeId = data.nodeId || 'node-02';
           let finalName = data.name || data.nodeId || 'Server Worker';
 
+          // Auto-resolve IP Worker jika dikirim sebagai localhost / 127.0.0.1
+          let workerUrl = data.url;
+          if (!workerUrl || workerUrl.includes('localhost') || workerUrl.includes('127.0.0.1')) {
+            workerUrl = `http://${clientIp}:${config.clusterPort}`;
+          }
+
           // Jika node yang mendaftar memiliki ID yang SAMA dengan Master atau sudah dipakai node lain yang beda URL:
           const isSameAsMaster = finalNodeId === config.nodeId;
-          const isConflictWithExisting = this.nodes.has(finalNodeId) && this.nodes.get(finalNodeId).url !== data.url;
+          const isConflictWithExisting = this.nodes.has(finalNodeId) && this.nodes.get(finalNodeId).url !== workerUrl;
 
           if (isSameAsMaster || isConflictWithExisting) {
             let nextIndex = 2;
@@ -124,19 +134,19 @@ class ClusterManager {
             if (!data.name || data.name === config.nodeName || data.name === 'Server Utama' || data.name === 'Server VPS (AlmaLinux)') {
               finalName = `Server Node ${nextIndex}`;
             }
-            console.warn(`[⚠️ Cluster ID Duplikat] Node dari ${data.url || 'remote'} menggunakan ID yang sama ('${data.nodeId}'). Dialokasikan otomatis menjadi ID unik: '${finalNodeId}', Nama: '${finalName}'`);
+            console.warn(`[⚠️ Cluster ID Duplikat] Node dari ${clientIp} menggunakan ID yang sama ('${data.nodeId}'). Dialokasikan otomatis menjadi ID unik: '${finalNodeId}', Nama: '${finalName}'`);
           }
 
           this.nodes.set(finalNodeId, {
             nodeId: finalNodeId,
             name: finalName,
             role: data.role || 'worker',
-            url: data.url,
+            url: workerUrl,
             status: 'online',
             lastSeen: Date.now()
           });
 
-          console.log(`[🌐 Cluster] Node terdaftar: ${finalName} (${finalNodeId}) sebagai ${data.role || 'worker'}`);
+          console.log(`[🌐 Cluster] Node terdaftar: ${finalName} (${finalNodeId}) sebagai ${data.role || 'worker'} (URL: ${workerUrl})`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({
             success: true,
