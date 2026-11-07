@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const security = require('./security');
 const config = require('./config');
 
@@ -466,21 +467,24 @@ class ClusterManager {
   }
 
   /**
-   * Helper HTTP POST JSON
+   * Helper HTTP/HTTPS POST JSON
    */
   postJson(urlStr, data, timeoutMs = 8000) {
     return new Promise((resolve, reject) => {
       const url = new URL(urlStr);
       const postData = JSON.stringify(data);
+      const client = url.protocol === 'https:' ? https : http;
+      const defaultPort = url.protocol === 'https:' ? 443 : 80;
 
-      const req = http.request({
+      const req = client.request({
         hostname: url.hostname,
-        port: url.port || 80,
-        path: url.pathname,
+        port: url.port || defaultPort,
+        path: url.pathname + (url.search || ''),
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(postData),
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SecurityAgent/1.0',
           'x-cluster-secret': config.clusterSecret
         },
         timeout: timeoutMs
@@ -504,17 +508,21 @@ class ClusterManager {
   }
 
   /**
-   * Helper HTTP GET JSON
+   * Helper HTTP/HTTPS GET JSON
    */
   getJson(urlStr, timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
       const url = new URL(urlStr);
-      const req = http.request({
+      const client = url.protocol === 'https:' ? https : http;
+      const defaultPort = url.protocol === 'https:' ? 443 : 80;
+
+      const req = client.request({
         hostname: url.hostname,
-        port: url.port || 80,
-        path: url.pathname,
+        port: url.port || defaultPort,
+        path: url.pathname + (url.search || ''),
         method: 'GET',
         headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SecurityAgent/1.0',
           'x-cluster-secret': config.clusterSecret
         },
         timeout: timeoutMs

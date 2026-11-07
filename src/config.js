@@ -8,6 +8,12 @@ const rawAdmins = (process.env.ADMIN_NUMBERS || '')
   .map(n => n.replace(/[^0-9]/g, ''))
   .filter(Boolean);
 
+let rawMasterUrl = (process.env.MASTER_URL || 'http://127.0.0.1:5005').trim();
+if (!/^https?:\/\//i.test(rawMasterUrl)) {
+  rawMasterUrl = `https://${rawMasterUrl}`;
+}
+rawMasterUrl = rawMasterUrl.replace(/\/+$/, '');
+
 const config = {
   adminNumbers: rawAdmins,
   qrPort: parseInt(process.env.QR_PORT, 10) || 5005,
@@ -29,7 +35,7 @@ const config = {
   nodeId: process.env.NODE_ID || 'node-01',
   nodeName: process.env.NODE_NAME || 'Server Utama (Windows)',
   clusterPort: parseInt(process.env.CLUSTER_PORT || '5005', 10),
-  masterUrl: process.env.MASTER_URL || 'http://127.0.0.1:5005',
+  masterUrl: rawMasterUrl,
   clusterSecret: process.env.CLUSTER_SECRET || 'secops-cluster-token-secret-2026',
   failoverTimeoutSeconds: parseInt(process.env.FAILOVER_TIMEOUT_SECONDS || '30', 10),
 
