@@ -132,11 +132,13 @@ Ketik **`monitor`** atau **`menu`** di WhatsApp untuk memunculkan menu kontrol:
 
 ---
 
-## 🔐 Keamanan & Privasi
+## 🔐 Keamanan Berlapis (Defense in Depth)
 
 - **Whitelist Nomor Ponsel:** Hanya nomor admin yang terdaftar yang dapat mengeksekusi perintah.
-- **Kredensial Sesi:** Kunci otentikasi WhatsApp (`session_auth/`) dan file konfigurasi rahasia (`.env`) dimasukkan ke dalam `.gitignore` sehingga **TIDAK PERNAH** terunggah ke repositori publik.
-- **Safe Command Mapping:** Sistem tidak menjalankan raw shell bebas dari input pengguna untuk mencegah celah *Command Injection*. Setiap parameter divalidasi dengan regex ketat.
+- **🚨 Notifikasi Penyusup (Intruder Alert):** Jika nomor asing/tidak dikenal mencoba mengirim perintah atau pesan ke bot, akses otomatis diblokir diam-diam dan bot langsung mengirim pesan darurat ke WhatsApp Admin (`Nomor, Waktu, Isi Pesan`).
+- **🔑 Verifikasi PIN 2-Factor Authentication:** Perintah berisiko tinggi (Restart container, Blokir Firewall, dan Emergency Lockdown) diwajibkan konfirmasi PIN keamanan (default: `1234` di `.env`).
+- **Kredensial Sesi Terisolasi:** Kunci otentikasi WhatsApp (`session_auth/`) dan file rahasia (`.env`) otomatis diabaikan oleh `.gitignore` sehingga **TIDAK PERNAH** terunggah ke repositori GitHub.
+- **Safe Command Mapping:** Sistem tidak menjalankan raw shell bebas untuk mencegah serangan *Prompt Injection* dan *Command Injection*. Semua parameter diperiksa dengan regex ketat.
 
 ---
 

@@ -14,6 +14,8 @@ class WhatsAppClient {
     this.currentQrDataUrl = null;
     this.isConnected = false;
     this.httpServer = null;
+    this.pendingActions = new Map(); // cleanSender -> { action, target, expiresAt }
+    this.intruderAlerts = new Map(); // cleanSender -> lastAlertTimestamp
   }
 
   async start() {
@@ -183,7 +185,67 @@ class WhatsAppClient {
 
     if (!config.isAdmin(senderJid)) {
       console.log(`[⚠️ Akses Ditolak] Pesan dari nomor tidak dikenal: ${cleanSender}`);
+
+      // Intruder Alert ke WhatsApp Admin Utama
+      if (config.intruderAlert && config.adminNumbers.length > 0) {
+        const now = Date.now();
+        const lastAlert = this.intruderAlerts.get(cleanSender) || 0;
+        // Batasi notifikasi max 1 kali per 3 menit per nomor asing agar tidak spam
+        if (now - lastAlert > 3 * 60 * 1000) {
+          this.intruderAlerts.set(cleanSender, now);
+          const alertMsg = 
+`🚨 *PERINGATAN PENYUSUP (AKSES DITOLAK)* 🚨
+-----------------------------------------
+Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
+• *Nomor Pengirim:* +${cleanSender}
+• *Waktu:* ${new Date().toLocaleString('id-ID')}
+• *Isi Pesan:* "${text.substring(0, 150)}"
+• *Status:* 🛡️ Akses diblokir otomatis. Pesan tidak dibalas.
+-----------------------------------------`;
+
+          for (const adminNum of config.adminNumbers) {
+            try {
+              await this.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
+            } catch (err) {
+              console.error('Gagal kirim alert penyusup:', err.message);
+            }
+          }
+        }
+      }
       return; // Abaikan diam-diam untuk keamanan
+    }
+
+    // Periksa apakah Admin sedang dalam proses konfirmasi PIN tindakan kritis
+    if (this.pendingActions.has(cleanSender)) {
+      const pending = this.pendingActions.get(cleanSender);
+      const now = Date.now();
+
+      if (now > pending.expiresAt) {
+        this.pendingActions.delete(cleanSender);
+      } else {
+        const trimmed = text.trim().toLowerCase();
+
+        // Admin membatalkan
+        if (trimmed === 'batal' || trimmed === 'cancel') {
+          this.pendingActions.delete(cleanSender);
+          return await this.reply(senderJid, '✅ Tindakan kritis telah dibatalkan.');
+        }
+
+        // Cek PIN
+        let inputPin = text.trim();
+        if (inputPin.toLowerCase().startsWith('pin ')) {
+          inputPin = inputPin.substring(4).trim();
+        }
+
+        if (inputPin === config.securityPin) {
+          this.pendingActions.delete(cleanSender);
+          await this.reply(senderJid, '🔑 PIN terverifikasi. Mengeksekusi tindakan...');
+          return await this.executeAction(senderJid, pending.action, pending.target);
+        } else {
+          this.pendingActions.delete(cleanSender);
+          return await this.reply(senderJid, '❌ PIN keamanan salah! Tindakan dibatalkan demi keamanan server.');
+        }
+      }
     }
 
     console.log(`[📩 Pesan Masuk dari ${cleanSender}]: "${text}"`);
@@ -200,6 +262,7 @@ class WhatsAppClient {
   async processCommand(senderJid, text) {
     const raw = text.trim();
     const lower = raw.toLowerCase();
+    const cleanSender = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
     // 1. Menu Perintah / Monitor
     if (
@@ -347,10 +410,18 @@ ${driveStr || '  - Tidak ada data drive'}
       );
     }
     if (lower.startsWith('8 ') || lower.startsWith('!8 ') || lower.startsWith('!docker restart ')) {
-      let containerName = raw.replace(/^(!docker restart|!8|8)\s+/i, '').trim();
-      await this.reply(senderJid, `⏳ Merestart container *${containerName}*...`);
-      const result = await security.restartDockerContainer(containerName);
-      return await this.reply(senderJid, result);
+      const parts = raw.replace(/^(!docker restart|!8|8)\s+/i, '').trim().split(/\s+/);
+      const containerName = parts[0];
+      const inlinePin = parts[1] || null;
+      return await this.requestPinOrExecute(
+        senderJid,
+        cleanSender,
+        'restart_docker',
+        containerName,
+        'Restart Docker Container',
+        containerName,
+        inlinePin
+      );
     }
 
     // 9. Blokir IP
@@ -361,17 +432,41 @@ ${driveStr || '  - Tidak ada data drive'}
       );
     }
     if (lower.startsWith('9 ') || lower.startsWith('!9 ') || lower.startsWith('!block ')) {
-      let ip = raw.replace(/^(!block|!9|9)\s+/i, '').trim();
-      await this.reply(senderJid, `🧱 Menerapkan aturan blokir untuk IP *${ip}* di Firewall...`);
-      const result = await security.blockIp(ip);
-      return await this.reply(senderJid, `🛡️ ${result}`);
+      const parts = raw.replace(/^(!block|!9|9)\s+/i, '').trim().split(/\s+/);
+      const ip = parts[0];
+      const inlinePin = parts[1] || null;
+      return await this.requestPinOrExecute(
+        senderJid,
+        cleanSender,
+        'block_ip',
+        ip,
+        'Blokir IP di Firewall',
+        ip,
+        inlinePin
+      );
     }
 
     // 10. Emergency Lockdown
-    if (lower === '10' || lower === '!10' || lower === '!lockdown' || lower === 'lockdown') {
-      await this.reply(senderJid, '🚨 Menjalankan protokol EMERGENSI: Memutus Cloudflare Tunnel...');
-      const result = await security.emergencyLockdown();
-      return await this.reply(senderJid, `${result}\nUntuk mengaktifkan kembali, ketik *11* atau *!restore*.`);
+    if (
+      lower === '10' ||
+      lower === '!10' ||
+      lower === '!lockdown' ||
+      lower === 'lockdown' ||
+      lower.startsWith('10 ') ||
+      lower.startsWith('!10 ') ||
+      lower.startsWith('!lockdown ')
+    ) {
+      const parts = raw.split(/\s+/);
+      const inlinePin = parts.length > 1 ? parts[1] : null;
+      return await this.requestPinOrExecute(
+        senderJid,
+        cleanSender,
+        'lockdown',
+        null,
+        'Emergency Lockdown (Putus Akses Luar)',
+        'Cloudflare Tunnel',
+        inlinePin
+      );
     }
 
     // 11. Restore Tunnel
@@ -383,6 +478,60 @@ ${driveStr || '  - Tidak ada data drive'}
 
     // 12. Fallback AI Response via Ollama (jika pesan berupa pertanyaan santai/diskusi)
     await this.replyWithAI(senderJid, text);
+  }
+
+  async requestPinOrExecute(senderJid, cleanSender, action, target, title, desc, inlinePin) {
+    if (!config.requirePin) {
+      return await this.executeAction(senderJid, action, target);
+    }
+
+    // Jika admin menyertakan PIN langsung (inline)
+    if (inlinePin) {
+      if (inlinePin === config.securityPin) {
+        await this.reply(senderJid, '🔑 PIN terverifikasi. Mengeksekusi...');
+        return await this.executeAction(senderJid, action, target);
+      } else {
+        return await this.reply(senderJid, '❌ PIN keamanan salah! Tindakan dibatalkan.');
+      }
+    }
+
+    // Minta konfirmasi PIN secara interaktif
+    this.pendingActions.set(cleanSender, {
+      action,
+      target,
+      expiresAt: Date.now() + 60000
+    });
+
+    const msg = 
+`⚠️ *KONFIRMASI TINDAKAN KRITIS* ⚠️
+-----------------------------------------
+• *Tindakan:* ${title}
+• *Target:* \`${desc}\`
+
+Silakan balas dengan PIN keamanan Anda:
+Contoh: \`PIN 1234\` (atau cukup ketik angka PIN)
+
+_Konfirmasi berlaku 60 detik. Ketik *batal* untuk batalkan._
+-----------------------------------------`;
+    return await this.reply(senderJid, msg);
+  }
+
+  async executeAction(senderJid, action, target) {
+    if (action === 'restart_docker') {
+      await this.reply(senderJid, `⏳ Merestart container *${target}*...`);
+      const result = await security.restartDockerContainer(target);
+      return await this.reply(senderJid, result);
+    }
+    if (action === 'block_ip') {
+      await this.reply(senderJid, `🧱 Menerapkan aturan blokir untuk IP *${target}* di Firewall...`);
+      const result = await security.blockIp(target);
+      return await this.reply(senderJid, `🛡️ ${result}`);
+    }
+    if (action === 'lockdown') {
+      await this.reply(senderJid, '🚨 Menjalankan protokol EMERGENSI: Memutus Cloudflare Tunnel...');
+      const result = await security.emergencyLockdown();
+      return await this.reply(senderJid, `${result}\nUntuk mengaktifkan kembali, ketik *11* atau *!restore*.`);
+    }
   }
 
   async replyWithAI(senderJid, userQuestion) {

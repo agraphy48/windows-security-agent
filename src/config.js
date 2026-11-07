@@ -17,6 +17,9 @@ const config = {
   sessionDir: path.join(__dirname, '..', 'session_auth'),
   cloudflareExe: process.env.CLOUDFLARE_EXE || 'D:\\AI-Server\\tools\\cloudflared.exe',
   cloudflareArgs: process.env.CLOUDFLARE_ARGS || 'tunnel --config C:\\Users\\agrap\\.cloudflared\\config.yml run 67775b37-cc35-49c5-9cf2-7135fabea95a',
+  securityPin: process.env.SECURITY_PIN || '1234',
+  requirePin: (process.env.REQUIRE_PIN || 'true').toLowerCase() === 'true',
+  intruderAlert: (process.env.INTRUDER_ALERT || 'true').toLowerCase() === 'true',
 
   isAdmin(senderJid) {
     if (!senderJid) return false;
