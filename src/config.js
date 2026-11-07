@@ -23,6 +23,16 @@ const config = {
   pinTimeoutMinutes: parseInt(process.env.PIN_TIMEOUT_MINUTES ?? '15', 10),
   intruderAlert: (process.env.INTRUDER_ALERT || 'true').toLowerCase() === 'true',
 
+  // Cluster & High-Availability Failover Configuration
+  clusterEnabled: (process.env.CLUSTER_ENABLED || 'false').toLowerCase() === 'true',
+  clusterRole: (process.env.CLUSTER_ROLE || 'master').toLowerCase(), // 'master' | 'standby' | 'worker'
+  nodeId: process.env.NODE_ID || 'node-01',
+  nodeName: process.env.NODE_NAME || 'Server Utama (Windows)',
+  clusterPort: parseInt(process.env.CLUSTER_PORT || '5005', 10),
+  masterUrl: process.env.MASTER_URL || 'http://127.0.0.1:5005',
+  clusterSecret: process.env.CLUSTER_SECRET || 'secops-cluster-token-secret-2026',
+  failoverTimeoutSeconds: parseInt(process.env.FAILOVER_TIMEOUT_SECONDS || '30', 10),
+
   isAdmin(senderJid) {
     if (!senderJid) return false;
     const cleanNumber = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');

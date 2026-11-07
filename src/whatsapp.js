@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const security = require('./security');
+const cluster = require('./cluster');
 
 class WhatsAppClient {
   constructor() {
@@ -77,6 +78,9 @@ class WhatsAppClient {
         res.end();
       }
     });
+
+    // Inisialisasi API Cluster & Failover
+    cluster.init(this.httpServer);
 
     this.httpServer.listen(config.qrPort, () => {
       console.log(`[🌐 QR Web Portal] Siap di http://localhost:${config.qrPort}`);
@@ -388,6 +392,11 @@ Silakan balas dengan *NOMOR* atau *NAMA PERINTAH*:
 
 *12.* !lock (atau *kunci*)
    ↳ Kunci kembali sesi bot secara manual.
+
+🌐 *KONTROL MULTI-SERVER (CLUSTER & HA)*
+• *nodes* : Daftar semua server & statusnya
+• *all status* : Laporan kesehatan seluruh server
+• *node <id> <perintah>* : Kontrol server tertentu
 -----------------------------------------
 💡 *Cukup ketik nomornya saja (contoh: 2) untuk memilih.*`;
       return await this.reply(senderJid, menu);
@@ -556,7 +565,53 @@ ${driveStr || '  - Tidak ada data drive'}
       return await this.reply(senderJid, '🔒 *Sesi bot telah dikunci.* Masukkan PIN untuk membuka kembali.');
     }
 
-    // 13. Fallback AI Response via Ollama (jika pesan berupa pertanyaan santai/diskusi)
+    // 13. Cluster: Daftar Node Server
+    if (lower === 'nodes' || lower === 'servers' || lower === 'cluster' || lower === '!nodes' || lower === '!cluster') {
+      let out = `🖥️ *STATUS CLUSTER & FLEET SERVER*\n-----------------------------------------\n`;
+      for (const [id, node] of cluster.nodes.entries()) {
+        const icon = node.status === 'online' ? '🟢' : '🔴';
+        out += `${icon} *${node.name}* (\`${id}\`)\n   • Peran: *${node.role.toUpperCase()}* | Status: ${node.status.toUpperCase()}\n`;
+      }
+      out += `-----------------------------------------\n💡 Ketik *all status* untuk cek performa semua server.\n💡 Ketik *node <id> status* untuk cek server tertentu.`;
+      return await this.reply(senderJid, out);
+    }
+
+    // 14. Cluster: Status Seluruh Server (Aggregated Health)
+    if (lower === 'all status' || lower === 'status all' || lower === '!all status') {
+      await this.reply(senderJid, '⏳ Mengumpulkan data performa seluruh server di cluster...');
+      const reports = await cluster.aggregateStatus();
+      let out = `📊 *LAPORAN PERFORMA SELURUH SERVER*\n-----------------------------------------\n`;
+      for (const rep of reports) {
+        out += `• *${rep.name}* [${rep.status} - ${rep.role.toUpperCase()}]\n`;
+        if (rep.health && typeof rep.health.CPU !== 'undefined') {
+          out += `  - CPU: ${rep.health.CPU}% | RAM: ${rep.health.UsedRamGB} GB / ${rep.health.TotalRamGB} GB (${rep.health.RamPercent}%)\n`;
+          out += `  - Uptime: ${rep.health.Uptime || 'N/A'}\n`;
+        } else {
+          out += `  - Data: Tidak tersedia / Server offline\n`;
+        }
+        out += '\n';
+      }
+      out += `Total node terdaftar: ${reports.length} server.`;
+      return await this.reply(senderJid, out);
+    }
+
+    // 15. Cluster: Perintah Khusus Node (contoh: "node node-01 status")
+    if (lower.startsWith('node ')) {
+      const parts = raw.split(/\s+/);
+      if (parts.length < 3) {
+        return await this.reply(senderJid, 'ℹ️ Format perintah salah. Gunakan: `node <id_node> <perintah>`\nContoh: `node node-01 status`');
+      }
+      const targetId = parts[1];
+      const cmd = parts[2].toLowerCase();
+      await this.reply(senderJid, `⏳ Mengirim perintah *${cmd}* ke node *${targetId}*...`);
+      const res = await cluster.dispatchCommand(targetId, cmd);
+      if (res && res.error) {
+        return await this.reply(senderJid, `❌ ${res.error}`);
+      }
+      return await this.reply(senderJid, `✅ Hasil dari *${targetId}*:\n\`\`\`${JSON.stringify(res, null, 2).substring(0, 800)}\`\`\``);
+    }
+
+    // 16. Fallback AI Response via Ollama (jika pesan berupa pertanyaan santai/diskusi)
     await this.replyWithAI(senderJid, text);
   }
 

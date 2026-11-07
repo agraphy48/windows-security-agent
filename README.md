@@ -127,6 +127,29 @@ Ketik **`monitor`** atau **`menu`** di WhatsApp untuk memunculkan menu kontrol:
 | **9** | `9 <IP>` | Menambahkan aturan blokir IP langsung ke Firewall (Windows Firewall / UFW). |
 | **10** | `10` / `!lockdown` | **Mode Darurat:** Memutus Cloudflare Tunnel seketika jika diserang. |
 | **11** | `11` / `!restore` | Mengaktifkan kembali Cloudflare Tunnel ke domain server. |
+| **12** | `12` / `lock` | Mengunci kembali sesi bot secara manual. |
+
+### Perintah Multi-Server (Cluster & Fleet Control)
+- **`nodes`** : Menampilkan daftar seluruh server yang terhubung beserta status Online/Offline.
+- **`all status`** : Menampilkan laporan performa (CPU, RAM, Uptime) dari seluruh server sekaligus dalam 1 pesan.
+- **`node <id> <perintah>`** : Mengirim perintah spesifik ke server tertentu (contoh: `node node-02 scan`).
+
+---
+
+## 🌐 Arsitektur Multi-Server Cluster & Automated Failover (HA)
+
+Sistem ini mendukung pengelolaan banyak server secara terdistribusi dengan 3 peran (*role*):
+
+1. **Master Node (Koordinator Aktif):**
+   - Menjalankan gateway WhatsApp Web (Baileys) dan mengoordinasikan seluruh node.
+   - Konfigurasi `.env`: `CLUSTER_ROLE=master`
+2. **Standby Node (Backup Koordinator dengan Auto-Failover):**
+   - Memantau detak jantung (*Heartbeat*) Master Utama setiap 5 detik.
+   - Jika Master Utama mati/offline selama 30 detik (`FAILOVER_TIMEOUT_SECONDS`), node Standby **secara otonom mempromosikan diri menjadi Master Baru**, mengambil alih gateway WhatsApp, dan mengirim notifikasi darurat failover ke nomor WhatsApp Admin!
+   - Konfigurasi `.env`: `CLUSTER_ROLE=standby` dan `MASTER_URL=http://<ip-master>:5005`
+3. **Worker Node (Server Tambahan):**
+   - Menjalankan sensor keamanan lokal (scan, docker, firewall) dan melapor ke Master tanpa memerlukan nomor WhatsApp terpisah.
+   - Konfigurasi `.env`: `CLUSTER_ROLE=worker` dan `MASTER_URL=http://<ip-master>:5005`
 
 > **Tips:** Anda cukup membalas pesan bot dengan mengetik nomor pilihannya saja (misal: kirim pesan `2` untuk cek status).
 

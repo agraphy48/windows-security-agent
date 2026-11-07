@@ -115,3 +115,4 @@ Bantu menyusun paper dalam bahasa Inggris akademik:
 * **Jika Sesi WhatsApp logout:** Hapus folder `D:\AI-Server\security-agent\session_auth` lalu restart agen untuk scan ulang QR.
 * **Jika Port 5005 terpakai:** Ubah `QR_PORT` di `.env`.
 * **Jika Ingin Menambah Admin:** Masukkan nomor dengan format internasional (tanpa +) di `ADMIN_NUMBERS` pada file `.env` dipisahkan tanda koma.
+

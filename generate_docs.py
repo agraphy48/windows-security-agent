@@ -96,13 +96,16 @@ def create_document():
     p_rq.add_run("• RQ2: ").bold = True
     p_rq.add_run("Sejauh mana efektivitas integrasi sensor telemetri lintas platform (Windows API dan POSIX Linux) dalam menekan MTTR saat terjadi serangan siber aktif dibandingkan pendekatan SIEM tradisional?\n")
     p_rq.add_run("• RQ3: ").bold = True
-    p_rq.add_run("Bagaimana trade-off antara overhead komputasi (CPU/Memory overhead) agen penjaga lokal terhadap performa server saat pemindaian intensif berlangsung?")
+    p_rq.add_run("Bagaimana trade-off antara overhead komputasi (CPU/Memory overhead) agen penjaga lokal terhadap performa server saat pemindaian intensif berlangsung?\n")
+    p_rq.add_run("• RQ4: ").bold = True
+    p_rq.add_run("Bagaimana keandalan mekanisme automated heartbeat failover dalam mengeliminasi Single Point of Failure (SPOF) pada koordinasi armada server terdistribusi via Instant Messaging?")
 
     doc.add_heading("1.4 Kebaruan (Novelty) & Kontribusi Ilmiah", level=2)
     doc.add_paragraph(
         "1. Novelty 1: Dual-Layer Zero-Trust Authorization Model pada kanal IM (JID-Binding Whitelist + Stateful PIN Session Locking).\n"
         "2. Novelty 2: Cross-Platform Universal SecOps Engine yang secara transparan mengabstraksi PowerShell Windows API dan Bash POSIX Linux.\n"
-        "3. Novelty 3: Human-in-the-Loop Incident Containment dengan fail-safe Boundary Killswitch (Cloudflare Tunnel termination) tanpa memerlukan IP publik statis."
+        "3. Novelty 3: Human-in-the-Loop Incident Containment dengan fail-safe Boundary Killswitch (Cloudflare Tunnel termination) tanpa memerlukan IP publik statis.\n"
+        "4. Novelty 4: Fault-Tolerant High-Availability Failover (Master-Standby-Worker Cluster) yang secara otonom mendeteksi kematian Master dan mempromosikan node cadangan tanpa kehilangan kendali WhatsApp."
     )
 
     # BAB II
@@ -166,6 +169,19 @@ def create_document():
     p_sec.add_run("Nomor yang tidak terdaftar pada whitelist JID akan diabaikan tanpa balasan pesan (silent drop), mencegah kebocoran informasi. Secara bersamaan, bot mengirim pesan darurat ke admin utama dengan detail waktu, nomor penyusup, dan isi pesan.\n")
     p_sec.add_run("3. Safe Execution Sandboxing: ").bold = True
     p_sec.add_run("Sistem menolak perintah arbitrer bebas (tanpa eval atau arbitrary shell input). Seluruh perintah divalidasi dengan regular expression ketat.")
+
+    doc.add_heading("2.3 Arsitektur Multi-Server Cluster & Automated Failover (High Availability)", level=2)
+    p_clust = doc.add_paragraph()
+    p_clust.add_run(
+        "Untuk mengeliminasi Single Point of Failure (SPOF) dan mengelola banyak server melalui 1 nomor WhatsApp, "
+        "sistem mengimplementasikan arsitektur Cluster berbasis peran (Role-Based Clustering):\n"
+    )
+    p_clust.add_run("• Master Coordinator: ").bold = True
+    p_clust.add_run("Satu-satunya node yang mengaktifkan koneksi WebSocket WhatsApp (Baileys), menerima perintah admin, memelihara tabel registrasi node (Cluster Node Registry), serta mengagregasi telemetri dari worker.\n")
+    p_clust.add_run("• Standby Master (Hot Backup): ").bold = True
+    p_clust.add_run("Node cadangan yang memantau detak jantung (Heartbeat) Master Utama setiap 5 detik. Jika Master Utama gagal merespons selama ambang batas (default 30 detik), Standby secara otonom mempromosikan diri menjadi Master, mengaktifkan gateway WhatsApp, dan mengirimkan notifikasi peringatan Failover darurat ke nomor WhatsApp Admin.\n")
+    p_clust.add_run("• Worker Nodes: ").bold = True
+    p_clust.add_run("Node server biasa yang menjalankan listener REST API internal terenkripsi pre-shared key (x-cluster-secret), mengeksekusi perintah keamanan lokal (scan, docker, firewall), dan mengirim status berkala ke Master tanpa memerlukan nomor WhatsApp terpisah.")
 
     # BAB III
     doc.add_heading("BAB III: MODEL ANCAMAN & ANALISIS KEAMANAN (STRIDE MODEL)", level=1)
@@ -290,9 +306,22 @@ def create_document():
     out_path_1 = r"D:\AI-Server\security-agent\docs\Spesifikasi_Fitur_dan_Rencana_Penelitian_Q1.docx"
     out_path_2 = r"D:\AI-Server\Spesifikasi_Fitur_dan_Rencana_Penelitian_Q1.docx"
     
-    doc.save(out_path_1)
-    doc.save(out_path_2)
-    print(f"[OK] Dokumen berhasil dibuat di:\n - {out_path_1}\n - {out_path_2}")
+    try:
+        doc.save(out_path_1)
+        print(f"[OK] Disimpan di: {out_path_1}")
+    except Exception as e:
+        alt_path_1 = r"D:\AI-Server\security-agent\docs\Spesifikasi_Fitur_dan_Rencana_Penelitian_Q1_Cluster.docx"
+        doc.save(alt_path_1)
+        print(f"[OK] File 1 sedang dibuka di Word, disimpan di: {alt_path_1}")
+
+    try:
+        doc.save(out_path_2)
+        print(f"[OK] Disimpan di: {out_path_2}")
+    except Exception as e:
+        alt_path_2 = r"D:\AI-Server\Spesifikasi_Fitur_dan_Rencana_Penelitian_Q1_Cluster.docx"
+        doc.save(alt_path_2)
+        print(f"[OK] File 2 sedang dibuka di Word, disimpan di alternatif: {alt_path_2}")
 
 if __name__ == "__main__":
     create_document()
+
