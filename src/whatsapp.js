@@ -15,6 +15,8 @@ class WhatsAppClient {
     this.isConnected = false;
     this.httpServer = null;
     this.pendingActions = new Map(); // cleanSender -> { action, target, expiresAt }
+    this.pendingCommands = new Map(); // cleanSender -> textToExecuteAfterUnlock
+    this.adminSessions = new Map(); // cleanSender -> lastAuthTimestamp
     this.intruderAlerts = new Map(); // cleanSender -> lastAlertTimestamp
   }
 
@@ -215,7 +217,76 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
       return; // Abaikan diam-diam untuk keamanan
     }
 
-    // Periksa apakah Admin sedang dalam proses konfirmasi PIN tindakan kritis
+    // 1. Cek perintah KUNCI manual
+    const trimmedLower = text.trim().toLowerCase();
+    if (trimmedLower === 'lock' || trimmedLower === '!lock' || trimmedLower === 'kunci' || trimmedLower === '12' || trimmedLower === '!12') {
+      this.adminSessions.delete(cleanSender);
+      this.pendingCommands.delete(cleanSender);
+      this.pendingActions.delete(cleanSender);
+      return await this.reply(senderJid, '🔒 *Akses bot telah dikunci.* Kirim PIN Anda untuk membuka sesi kembali.');
+    }
+
+    // 2. Jika konfigurasi requirePinAll aktif (SEMUA HARUS MENGGUNAKAN PIN):
+    if (config.requirePinAll) {
+      const lastAuth = this.adminSessions.get(cleanSender);
+      const isSessionValid = lastAuth && (config.pinTimeoutMinutes > 0) && (Date.now() - lastAuth < config.pinTimeoutMinutes * 60 * 1000);
+
+      // Cek apakah pesan adalah input PIN murni (misal: "465157" atau "PIN 465157")
+      let rawPinInput = text.trim();
+      if (rawPinInput.toLowerCase().startsWith('pin ')) {
+        rawPinInput = rawPinInput.substring(4).trim();
+      }
+
+      if (rawPinInput === config.securityPin) {
+        this.adminSessions.set(cleanSender, Date.now());
+        const pendingCmd = this.pendingCommands.get(cleanSender);
+        this.pendingCommands.delete(cleanSender);
+
+        if (pendingCmd) {
+          await this.reply(senderJid, `🔓 *PIN BENAR - SESI DIBUKA!*\nMengeksekusi perintah sebelumnya: *${pendingCmd}*...`);
+          return await this.processCommand(senderJid, pendingCmd);
+        } else {
+          const timeoutText = config.pinTimeoutMinutes > 0 ? `Sesi aktif selama ${config.pinTimeoutMinutes} menit.` : 'Setiap perintah wajib menyertakan PIN.';
+          return await this.reply(senderJid, `🔓 *PIN BENAR - AKSES DIBUKA!*\n${timeoutText}\n\nKetik *monitor* untuk melihat panel kontrol.\nKetik *lock* kapan saja untuk mengunci kembali.`);
+        }
+      }
+
+      // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157" atau "2 465157")
+      const words = text.trim().split(/\s+/);
+      if (words.length > 1 && words[words.length - 1] === config.securityPin) {
+        this.adminSessions.set(cleanSender, Date.now());
+        words.pop(); // buang PIN
+        const cmdWithoutPin = words.join(' ');
+        console.log(`[🔑 Auth Inline] Nomor ${cleanSender} mengotorisasi perintah: "${cmdWithoutPin}"`);
+        return await this.processCommand(senderJid, cmdWithoutPin);
+      }
+
+      // Jika sesi belum dibuka dan input bukan PIN yang benar
+      if (!isSessionValid) {
+        // Jika tampaknya mencoba menebak PIN angka
+        if (/^\d{4,8}$/.test(rawPinInput) || text.toLowerCase().startsWith('pin ')) {
+          return await this.reply(senderJid, '❌ *PIN KEAMANAN SALAH!* Akses bot tetap terkunci.');
+        }
+
+        // Simpan perintah yang ingin dijalankan agar otomatis dieksekusi setelah PIN dimasukkan
+        this.pendingCommands.set(cleanSender, text.trim());
+        return await this.reply(
+          senderJid,
+`🔒 *BOT KEAMANAN TERKUNCI* 🔒
+-----------------------------------------
+Semua perintah membutuhkan verifikasi PIN.
+
+Silakan masukkan PIN keamanan Anda:
+Contoh: \`PIN <kode_pin>\` atau langsung kirim angka PIN.
+-----------------------------------------`
+        );
+      }
+
+      // Jika sesi valid, perbarui waktu aktifitas
+      this.adminSessions.set(cleanSender, Date.now());
+    }
+
+    // Periksa apakah Admin sedang dalam proses konfirmasi PIN tindakan kritis lanjutan
     if (this.pendingActions.has(cleanSender)) {
       const pending = this.pendingActions.get(cleanSender);
       const now = Date.now();
@@ -314,6 +385,9 @@ Silakan balas dengan *NOMOR* atau *NAMA PERINTAH*:
 
 *11.* !restore
    ↳ Mengaktifkan kembali Cloudflare Tunnel ke domain kedukanaksara.com.
+
+*12.* !lock (atau *kunci*)
+   ↳ Kunci kembali sesi bot secara manual.
 -----------------------------------------
 💡 *Cukup ketik nomornya saja (contoh: 2) untuk memilih.*`;
       return await this.reply(senderJid, menu);
@@ -476,7 +550,13 @@ ${driveStr || '  - Tidak ada data drive'}
       return await this.reply(senderJid, `✅ ${result}`);
     }
 
-    // 12. Fallback AI Response via Ollama (jika pesan berupa pertanyaan santai/diskusi)
+    // 12. Manual Lock
+    if (lower === '12' || lower === '!12' || lower === 'lock' || lower === '!lock' || lower === 'kunci') {
+      this.adminSessions.delete(cleanSender);
+      return await this.reply(senderJid, '🔒 *Sesi bot telah dikunci.* Masukkan PIN untuk membuka kembali.');
+    }
+
+    // 13. Fallback AI Response via Ollama (jika pesan berupa pertanyaan santai/diskusi)
     await this.replyWithAI(senderJid, text);
   }
 

@@ -19,6 +19,8 @@ const config = {
   cloudflareArgs: process.env.CLOUDFLARE_ARGS || 'tunnel --config C:\\Users\\agrap\\.cloudflared\\config.yml run 67775b37-cc35-49c5-9cf2-7135fabea95a',
   securityPin: process.env.SECURITY_PIN || '1234',
   requirePin: (process.env.REQUIRE_PIN || 'true').toLowerCase() === 'true',
+  requirePinAll: (process.env.REQUIRE_PIN_ALL ?? 'true').toLowerCase() === 'true',
+  pinTimeoutMinutes: parseInt(process.env.PIN_TIMEOUT_MINUTES ?? '15', 10),
   intruderAlert: (process.env.INTRUDER_ALERT || 'true').toLowerCase() === 'true',
 
   isAdmin(senderJid) {
