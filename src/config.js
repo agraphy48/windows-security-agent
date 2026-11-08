@@ -32,6 +32,7 @@ const config = {
   // Web Portal Dashboard Authentication
   dashboardUser: process.env.DASHBOARD_USER || 'admin',
   dashboardPass: process.env.DASHBOARD_PASS || process.env.SECURITY_PIN || '465157',
+  dashboard2Fa: (process.env.DASHBOARD_2FA ?? 'true').toLowerCase() === 'true',
 
   // Cluster & High-Availability Failover Configuration
   clusterEnabled: (process.env.CLUSTER_ENABLED || 'false').toLowerCase() === 'true',

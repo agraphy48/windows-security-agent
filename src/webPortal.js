@@ -1,4 +1,6 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const contactsManager = require('./contacts');
 const config = require('./config');
 const cluster = require('./cluster');
@@ -18,6 +20,31 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function logAuthEvent(type, ip, user, reason) {
+  const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  const line = `${timestamp} [${type}] IP: ${ip} User: ${user || 'unknown'} Reason: ${reason}\n`;
+  
+  const targets = [];
+  if (process.platform === 'linux') {
+    targets.push('/var/log/secops-portal-auth.log');
+  }
+  const localLogDir = path.join(__dirname, '..', 'logs');
+  targets.push(path.join(localLogDir, 'secops-portal-auth.log'));
+
+  for (const logPath of targets) {
+    try {
+      const dir = path.dirname(logPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.appendFileSync(logPath, line, 'utf8');
+      break;
+    } catch {
+      // Continue to next fallback target
+    }
+  }
 }
 
 class RateLimiter {
@@ -62,13 +89,51 @@ class RateLimiter {
 
 class WebPortal {
   constructor() {
-    this.sessions = new Map(); // token -> { username, expiresAt }
-    this.failedLogins = new Map(); // ip -> { count, lockedUntil }
-    this.sessionTimeoutMs = 24 * 60 * 60 * 1000; // 24 jam
-    this.globalLimiter = new RateLimiter(60 * 1000, 150); // Max 150 req/menit per IP
+    this.sessions = new Map(); // token -> { username, fingerprint, createdAt, lastActive, expiresAt }
+    this.failedLogins = new Map(); // ip -> { count, lockedUntil, lastFail }
+    this.userFailures = new Map(); // username -> { count, lockedUntil, lastFail }
+    this.bannedIps = new Map(); // ip -> bannedUntil (24 jam)
+    this.usedNonces = new Set(); // set of used nonces
+    this.pending2Fa = new Map(); // twoFaToken -> { username, otp, expiresAt, attempts, ip, userAgent }
+    this.lastOtpResend = new Map(); // ip -> timestamp
+
+    this.tokenSecret = crypto.randomBytes(32).toString('hex'); // Ephemeral secret per runtime
+    this.sessionTimeoutMs = 2 * 60 * 60 * 1000; // 2 jam inactivity timeout
+    
+    this.globalLimiter = new RateLimiter(60 * 1000, 120); // Max 120 req/menit per IP
+    this.loginLimiter = new RateLimiter(3 * 60 * 1000, 6); // Max 6 percobaan login per 3 menit
+    this.verify2FaLimiter = new RateLimiter(3 * 60 * 1000, 8); // Max 8 verifikasi OTP per 3 menit
     this.testWaLimiter = new RateLimiter(60 * 1000, 5); // Max 5 tes WA/menit
     this.botPairLimiter = new RateLimiter(5 * 60 * 1000, 5); // Max 5 pairing req/5 menit
     this.contactsWriteLimiter = new RateLimiter(60 * 1000, 30); // Max 30 modifikasi kontak/menit
+
+    setInterval(() => this.periodicCleanup(), 5 * 60 * 1000).unref();
+  }
+
+  periodicCleanup() {
+    const now = Date.now();
+    for (const [token, sess] of this.sessions.entries()) {
+      if (now > sess.expiresAt) this.sessions.delete(token);
+    }
+    for (const [twoFaId, item] of this.pending2Fa.entries()) {
+      if (now > item.expiresAt) this.pending2Fa.delete(twoFaId);
+    }
+    for (const [ip, until] of this.bannedIps.entries()) {
+      if (now > until) this.bannedIps.delete(ip);
+    }
+    for (const [ip, info] of this.failedLogins.entries()) {
+      if (now - (info.lastFail || 0) > 30 * 60 * 1000 && (!info.lockedUntil || now > info.lockedUntil)) {
+        this.failedLogins.delete(ip);
+      }
+    }
+    for (const [user, info] of this.userFailures.entries()) {
+      if (now - (info.lastFail || 0) > 30 * 60 * 1000 && (!info.lockedUntil || now > info.lockedUntil)) {
+        this.userFailures.delete(user);
+      }
+    }
+    if (this.usedNonces.size > 20000) {
+      this.usedNonces.clear();
+    }
   }
 
   setSecurityHeaders(req, res) {
@@ -76,12 +141,14 @@ class WebPortal {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com;");
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self';");
 
     const proto = req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : '');
     if (proto === 'https' || req.headers['cf-visitor']?.includes('https')) {
-      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     }
   }
 
@@ -100,6 +167,102 @@ class WebPortal {
     return list;
   }
 
+  getClientIp(req) {
+    const rawRemote = req.socket?.remoteAddress || '';
+    const socketRemote = String(rawRemote).replace(/^.*:/, '').trim();
+    const isLoopback = socketRemote === '127.0.0.1' || socketRemote === '::1' || socketRemote === 'localhost' || socketRemote === '';
+
+    // Hanya percaya header proxy jika koneksi fisik TCP benar-benar berasal dari localhost loopback (OpenLiteSpeed / Nginx)
+    if (isLoopback) {
+      // 1. Cloudflare Connecting IP
+      const cfIp = req.headers['cf-connecting-ip'];
+      if (cfIp && typeof cfIp === 'string' && cfIp.trim()) {
+        return cfIp.trim().replace(/^.*:/, '');
+      }
+      // 2. Standard Reverse Proxy X-Real-IP
+      const realIp = req.headers['x-real-ip'];
+      if (realIp && typeof realIp === 'string' && realIp.trim()) {
+        return realIp.trim().replace(/^.*:/, '');
+      }
+      // 3. X-Forwarded-For
+      const xff = req.headers['x-forwarded-for'];
+      if (xff && typeof xff === 'string' && xff.trim()) {
+        const parts = xff.split(',');
+        if (parts.length > 0) return parts[0].trim().replace(/^.*:/, '');
+      }
+    }
+
+    // Jika koneksi langsung dari internet ke port 5005 tanpa melalui proxy lokal, pakai socket IP langsung (tidak bisa dipalsukan)
+    return socketRemote || 'unknown';
+  }
+
+  generateLoginCsrf(ip) {
+    const timestamp = Date.now();
+    const nonce = crypto.randomBytes(12).toString('hex');
+    const hmac = crypto.createHmac('sha256', this.tokenSecret).update(`${timestamp}:${nonce}:${ip}`).digest('hex');
+    return Buffer.from(`${timestamp}:${nonce}:${hmac}`).toString('base64');
+  }
+
+  verifyLoginCsrf(token, ip) {
+    if (!token || typeof token !== 'string') return { valid: false, reason: 'Token keamanan kosong atau tidak ada' };
+    try {
+      const decoded = Buffer.from(token, 'base64').toString('utf8');
+      const [tsStr, nonce, sig] = decoded.split(':');
+      if (!tsStr || !nonce || !sig) return { valid: false, reason: 'Format token keamanan rusak' };
+
+      const timestamp = parseInt(tsStr, 10);
+      if (isNaN(timestamp)) return { valid: false, reason: 'Timestamp token tidak valid' };
+
+      const expectedHmac = crypto.createHmac('sha256', this.tokenSecret).update(`${timestamp}:${nonce}:${ip}`).digest('hex');
+      if (!crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expectedHmac, 'hex'))) {
+        return { valid: false, reason: 'Tanda tangan kriptografi token tidak cocok' };
+      }
+
+      const now = Date.now();
+      const elapsed = now - timestamp;
+      // Bot detection: Kecepatan pengisian di bawah 700ms (tidak wajar untuk interaksi manusia)
+      if (elapsed < 700) {
+        return { valid: false, isBotSpeed: true, elapsed, reason: `Pengiriman terlalu cepat (${elapsed}ms). Script otomatis/bot terdeteksi.` };
+      }
+
+      // Token kedaluwarsa setelah 15 menit
+      if (elapsed > 15 * 60 * 1000) {
+        return { valid: false, isExpired: true, reason: 'Halaman login telah kedaluwarsa (lebih dari 15 menit). Silakan refresh.' };
+      }
+
+      // Replay attack prevention: Nonce hanya boleh digunakan 1 kali
+      if (this.usedNonces.has(nonce)) {
+        return { valid: false, reason: 'Percobaan pengulangan token (Replay attack dicegah).' };
+      }
+      this.usedNonces.add(nonce);
+
+      return { valid: true };
+    } catch (err) {
+      return { valid: false, reason: 'Gagal memverifikasi token: ' + err.message };
+    }
+  }
+
+  createSession(username, req, res) {
+    const ip = this.getClientIp(req);
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    const fingerprint = crypto.createHash('sha256').update(`${ip}:${userAgent}`).digest('hex');
+    const token = crypto.randomBytes(32).toString('hex');
+    const now = Date.now();
+
+    this.sessions.set(token, {
+      username,
+      fingerprint,
+      createdAt: now,
+      lastActive: now,
+      expiresAt: now + this.sessionTimeoutMs
+    });
+
+    const isHttps = (req.headers['x-forwarded-proto'] === 'https') || (req.headers['cf-visitor']?.includes('https')) || !!req.socket?.encrypted;
+    const cookieFlags = `Path=/; HttpOnly; SameSite=Strict; Max-Age=7200${isHttps ? '; Secure' : ''}`;
+    res.setHeader('Set-Cookie', `secops_session=${token}; ${cookieFlags}`);
+    return token;
+  }
+
   getSession(req) {
     const cookies = this.parseCookies(req);
     const token = cookies.secops_session;
@@ -108,32 +271,27 @@ class WebPortal {
     const session = this.sessions.get(token);
     if (!session) return null;
 
-    if (Date.now() > session.expiresAt) {
+    const now = Date.now();
+    if (now > session.expiresAt) {
       this.sessions.delete(token);
       return null;
     }
-    return session;
-  }
 
-  getClientIp(req) {
-    // 1. Cloudflare IP (jika di balik Cloudflare Proxy)
-    const cfIp = req.headers['cf-connecting-ip'];
-    if (cfIp && typeof cfIp === 'string') return cfIp.trim();
+    // Session Fingerprint Anti-Hijacking Check
+    const ip = this.getClientIp(req);
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    const currentFingerprint = crypto.createHash('sha256').update(`${ip}:${userAgent}`).digest('hex');
 
-    // 2. Standard Reverse Proxy X-Real-IP
-    const realIp = req.headers['x-real-ip'];
-    if (realIp && typeof realIp === 'string') return realIp.trim();
-
-    // 3. X-Forwarded-For (ambil IP pertama klien)
-    const xff = req.headers['x-forwarded-for'];
-    if (xff && typeof xff === 'string') {
-      const parts = xff.split(',');
-      if (parts.length > 0) return parts[0].trim().replace(/^.*:/, '');
+    if (session.fingerprint && session.fingerprint !== currentFingerprint) {
+      this.sessions.delete(token);
+      logAuthEvent('SESSION_HIJACK', ip, session.username, 'Session IP/User-Agent fingerprint mismatch');
+      console.warn(`[🚨 SESSION HIJACKING BLOCKED] Token ${token.substring(0,8)}... dicoba dipakai dari IP ${ip} yang tidak cocok dengan sesi asli!`);
+      return null;
     }
 
-    // 4. Fallback ke Socket Remote Address
-    const remote = req.socket?.remoteAddress || 'unknown';
-    return String(remote).replace(/^.*:/, '');
+    session.lastActive = now;
+    session.expiresAt = now + this.sessionTimeoutMs;
+    return session;
   }
 
   async readBody(req, maxSize = 1048576) {
@@ -148,7 +306,7 @@ class WebPortal {
         if (receivedBytes > maxSize) {
           aborted = true;
           req.destroy();
-          const err = new Error('Payload melebihi batas ukuran maksimal (1MB).');
+          const err = new Error('Payload melebihi batas ukuran maksimal.');
           err.statusCode = 413;
           return reject(err);
         }
@@ -208,6 +366,15 @@ class WebPortal {
     const url = req.url.split('?')[0];
     const method = req.method.toUpperCase();
 
+    // 0.1 Proteksi Akses Langsung IP & Enforce Domain HTTPS
+    const host = (req.headers.host || '').toLowerCase();
+    const isDirectIpAccess = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(host);
+    if (isDirectIpAccess && (url === '/' || url === '/login' || url === '/dashboard' || url === '/qr')) {
+      res.writeHead(301, { Location: `https://pentest.portal-egn.com${url}` });
+      res.end();
+      return true;
+    }
+
     // 1. Static / Public Routes
     if (url === '/login' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);
@@ -221,12 +388,22 @@ class WebPortal {
         res.end();
         return true;
       }
-      this.renderLoginPage(res);
+      this.renderLoginPage(res, req);
       return true;
     }
 
     if (url === '/api/login' && method === 'POST') {
-      await this.handleApiLogin(req, res);
+      await this.handleApiLogin(req, res, waClient);
+      return true;
+    }
+
+    if (url === '/api/login/verify-2fa' && method === 'POST') {
+      await this.handleApiVerify2Fa(req, res, waClient);
+      return true;
+    }
+
+    if (url === '/api/login/resend-2fa' && method === 'POST') {
+      await this.handleApiResend2Fa(req, res, waClient);
       return true;
     }
 
@@ -236,12 +413,10 @@ class WebPortal {
     }
 
     if (url === '/' && (method === 'GET' || method === 'HEAD')) {
-      // Jika WhatsApp belum terhubung dan ada QR code
       if (!waClient.isConnected && waClient.currentQrDataUrl) {
         this.renderQrPage(res, waClient);
         return true;
       }
-      // Jika WhatsApp sudah terhubung, arahkan ke dashboard (atau login jika belum auth)
       const session = this.getSession(req);
       if (session) {
         res.writeHead(302, { Location: '/dashboard' });
@@ -432,17 +607,31 @@ class WebPortal {
       }
     }
 
-    return false; // Bukan request web portal
+    return false;
   }
 
-  async handleApiLogin(req, res) {
+  async handleApiLogin(req, res, waClient) {
     const ip = this.getClientIp(req);
     const now = Date.now();
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
 
-    // Cek proteksi brute force login
+    // 1. Cek apakah IP dibanned permanen/24 jam
+    const bannedUntil = this.bannedIps.get(ip);
+    if (bannedUntil && bannedUntil > now) {
+      const waitHours = Math.ceil((bannedUntil - now) / (60 * 60 * 1000));
+      logAuthEvent('BLOCKED_BANNED_IP', ip, 'unknown', 'Access attempted from banned IP');
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: false,
+        error: `Alamat IP Anda (${ip}) telah DIBLOKIR selama ${waitHours} jam karena terdeteksi aktivitas mencurigakan/bot.`
+      }));
+    }
+
+    // 2. Cek apakah IP dalam masa penguncian brute force
     const failInfo = this.failedLogins.get(ip);
     if (failInfo && failInfo.lockedUntil > now) {
       const waitSec = Math.ceil((failInfo.lockedUntil - now) / 1000);
+      logAuthEvent('BLOCKED_LOCKED_IP', ip, 'unknown', `IP locked for ${waitSec}s`);
       res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(waitSec) });
       return res.end(JSON.stringify({
         success: false,
@@ -450,19 +639,90 @@ class WebPortal {
       }));
     }
 
+    // 3. Cek Rate Limiting Percobaan Login (Max 6 req/3 menit)
+    if (this.loginLimiter.isLimited(ip)) {
+      const waitSec = this.loginLimiter.getResetTime(ip);
+      logAuthEvent('RATE_LIMITED', ip, 'unknown', `Login rate limit exceeded (${waitSec}s)`);
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(waitSec || 60) });
+      return res.end(JSON.stringify({
+        success: false,
+        error: `Terlalu banyak request login. Silakan tunggu ${waitSec || 60} detik sebelum mencoba kembali.`
+      }));
+    }
+
+    // 4. Baca Body dengan batasan payload ketat (Max 64KB)
     let body = {};
     try {
-      body = await this.readBody(req);
-    } catch (err) {
-      if (err.statusCode === 413) {
-        res.writeHead(413, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ success: false, error: 'Ukuran payload login melebihi batas maksimal (1MB).' }));
-      }
+      body = await this.readBody(req, 65536);
+    } catch {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Ukuran payload melebihi batas aman.' }));
     }
 
     const username = String(body.username || '').trim();
     const password = String(body.password || '').trim();
+    const secToken = String(body._sec_token || '').trim();
+    const hpWebsite = String(body._hp_website || '').trim();
+    const hpSecCode = String(body._hp_sec_code || '').trim();
 
+    // 5. HONEYPOT BOT DETECTION (Jika bot otomatis mengisi input tersembunyi)
+    if (hpWebsite !== '' || hpSecCode !== '') {
+      this.bannedIps.set(ip, now + (24 * 60 * 60 * 1000)); // Ban 24 jam langsung
+      logAuthEvent('BOT_HONEYPOT', ip, username, 'Honeypot field triggered by automated bot/crawler');
+      console.warn(`[🚨 BOT TRAP TRIGGERED] IP ${ip} mengisi field jebakan (honeypot). IP diblokir 24 jam.`);
+      
+      if (waClient && waClient.isConnected) {
+        waClient.broadcastToAdmins(
+`🚨 *PERINGATAN ANCAMAN: BOT OTOMATIS DITANGKAP!* 🚨
+-----------------------------------------
+• *Tipe Serangan:* Automated Bot / Login Crawler
+• *IP Penyerang:* \`${ip}\`
+• *Target Akun:* ${username || 'none'}
+• *Tindakan Sistem:* IP DIBLOKIR 24 JAM & Dimasukkan ke Log Firewall Fail2ban.
+-----------------------------------------
+Waktu Deteksi: ${new Date().toLocaleString('id-ID')}`
+        );
+      }
+
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: false,
+        error: 'Akses ditolak: Aktivitas bot / otomatisasi terdeteksi.'
+      }));
+    }
+
+    // 6. CRYPTOGRAPHIC CSRF & TIMING ANTI-BOT VERIFICATION
+    const tokenCheck = this.verifyLoginCsrf(secToken, ip);
+    if (!tokenCheck.valid) {
+      logAuthEvent('BOT_TOKEN_INVALID', ip, username, tokenCheck.reason);
+      if (tokenCheck.isBotSpeed) {
+        await new Promise(r => setTimeout(r, 2000));
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          success: false,
+          error: 'Aktivitas pengisian form tidak wajar (terlalu cepat). Mohon tunggu sebentar lalu coba lagi.'
+        }));
+      }
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: false,
+        error: tokenCheck.reason || 'Token keamanan form tidak valid. Silakan muat ulang halaman.'
+      }));
+    }
+
+    // 7. Cek Proteksi Brute-Force Berdasarkan Akun (Distributed Brute Force Prevention)
+    const userFailInfo = this.userFailures.get(username);
+    if (userFailInfo && userFailInfo.lockedUntil > now) {
+      const waitSec = Math.ceil((userFailInfo.lockedUntil - now) / 1000);
+      logAuthEvent('BLOCKED_ACCOUNT_LOCKED', ip, username, 'Account locked due to distributed attacks');
+      res.writeHead(423, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: false,
+        error: `Akun "${username}" sedang dikunci sementara (${waitSec} detik) demi keamanan karena terdeteksi upaya peretasan berulang dari berbagai IP.`
+      }));
+    }
+
+    // 8. Verifikasi Kredensial (Timing-Safe Comparison)
     const expectedUser = String(config.dashboardUser || 'admin');
     const expectedPass = String(config.dashboardPass || config.securityPin || '465157');
     const expectedPin = String(config.securityPin || '465157');
@@ -471,39 +731,233 @@ class WebPortal {
     const passValid = safeCompare(password, expectedPass) || safeCompare(password, expectedPin);
 
     if (userValid && passValid) {
-      // Login sukses
       this.failedLogins.delete(ip);
-      const token = crypto.randomBytes(32).toString('hex');
-      this.sessions.set(token, {
-        username,
-        createdAt: now,
-        expiresAt: now + this.sessionTimeoutMs
-      });
+      this.userFailures.delete(username);
 
-      const isHttps = (req.headers['x-forwarded-proto'] === 'https') || (req.headers['cf-visitor']?.includes('https')) || !!req.socket?.encrypted;
-      const cookieFlags = `Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${isHttps ? '; Secure' : ''}`;
+      const is2FaRequired = (config.dashboard2Fa !== false) && waClient && waClient.isConnected;
 
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Set-Cookie': `secops_session=${token}; ${cookieFlags}`
-      });
-      return res.end(JSON.stringify({ success: true, message: 'Login berhasil!' }));
+      if (is2FaRequired) {
+        const otp = String(crypto.randomInt(100000, 999999));
+        const twoFaToken = crypto.randomBytes(32).toString('hex');
+        
+        this.pending2Fa.set(twoFaToken, {
+          username,
+          otp,
+          expiresAt: now + (3 * 60 * 1000),
+          attempts: 0,
+          ip,
+          userAgent: req.headers['user-agent'] || 'unknown'
+        });
+
+        const cleanUa = (req.headers['user-agent'] || 'Browser Web').substring(0, 60);
+        const otpMessage = 
+`🔐 *KODE VERIFIKASI 2FA - SECOPS PORTAL* 🔐
+-----------------------------------------
+Kode OTP Rahasia: *${otp}*
+
+• *Tujuan:* Login ke Dashboard Urgensi
+• *Pengguna:* *${username}*
+• *IP Pengakses:* \`${ip}\`
+• *Perangkat:* ${cleanUa}
+• *Masa Berlaku:* 3 Menit
+-----------------------------------------
+⚠️ *JANGAN PERNAH MEMBERIKAN KODE INI KEPADA SIAPA PUN!*
+Jika Anda tidak merasa melakukan login, kemungkinan password Anda bocor dan penyerang sedang tertahan di gerbang 2FA ini.`;
+
+        await waClient.broadcastToAdmins(otpMessage);
+        logAuthEvent('2FA_SENT', ip, username, 'WhatsApp 2FA OTP dispatched to admins');
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          success: true,
+          require2FA: true,
+          twoFaToken,
+          message: 'Kredensial valid. Kode OTP 6-digit telah dikirimkan ke WhatsApp resmi Administrator.'
+        }));
+      }
+
+      this.createSession(username, req, res);
+      logAuthEvent('LOGIN_SUCCESS', ip, username, 'Direct login authenticated (2FA bypassed: WA offline)');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: true, require2FA: false, message: 'Login berhasil!' }));
+
     } else {
-      // Login gagal
       const currentFails = (failInfo ? failInfo.count : 0) + 1;
       let lockedUntil = 0;
+      let isSevere = false;
+
       if (currentFails >= 5) {
-        lockedUntil = now + (10 * 60 * 1000); // Kunci 10 menit
-        console.warn(`[🚨 BRUTE-FORCE LOGIN] IP ${ip} gagal 5x login ke Web Portal. IP dikunci 10 menit.`);
+        lockedUntil = now + (24 * 60 * 60 * 1000);
+        isSevere = true;
+      } else if (currentFails >= 3) {
+        lockedUntil = now + (15 * 60 * 1000);
       }
-      this.failedLogins.set(ip, { count: currentFails, lockedUntil });
+
+      this.failedLogins.set(ip, { count: currentFails, lockedUntil, lastFail: now });
+
+      const uFails = (userFailInfo ? userFailInfo.count : 0) + 1;
+      let uLockedUntil = 0;
+      if (uFails >= 8) {
+        uLockedUntil = now + (15 * 60 * 1000);
+        console.warn(`[🚨 DISTRIBUTED BRUTE FORCE] Akun "${username}" diserang 8x. Mengunci akun 15 menit.`);
+        if (waClient && waClient.isConnected) {
+          waClient.broadcastToAdmins(
+`🚨 *ALERT: INDIKASI SERANGAN BRUTE-FORCE TERDISTRIBUSI!* 🚨
+-----------------------------------------
+Terdeteksi 8x percobaan login salah berturut-turut pada akun *${username}* dari satu atau beberapa IP.
+Demi keamanan, login untuk akun ini dikunci selama 15 menit.`
+          );
+        }
+      }
+      this.userFailures.set(username, { count: uFails, lockedUntil: uLockedUntil, lastFail: now });
+
+      logAuthEvent('AUTH_FAIL', ip, username, `Invalid credentials attempt ${currentFails}/5`);
+
+      if (currentFails >= 3 && waClient && waClient.isConnected) {
+        waClient.broadcastToAdmins(
+`⚠️ *PERINGATAN KEAMANAN: PERCOBAAN LOGIN GAGAL BERULANG* ⚠️
+-----------------------------------------
+• *IP Sumber:* \`${ip}\`
+• *Target Akun:* *${username || 'admin'}*
+• *Jumlah Percobaan:* ${currentFails} kali gagal
+• *Status IP:* ${lockedUntil > 0 ? (isSevere ? '🚫 DIKUNCI 24 JAM' : '⏳ DIKUNCI 15 MENIT') : 'Memasuki batas kritis'}
+-----------------------------------------
+Sistem mencatat percobaan ini untuk blokir firewall Fail2ban.`
+        );
+      }
+
+      const delayMs = Math.min(1000 * Math.pow(1.5, Math.max(0, currentFails - 1)), 4500);
+      await new Promise(r => setTimeout(r, delayMs));
 
       res.writeHead(401, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         success: false,
-        error: 'Username atau Password/PIN salah!' + (currentFails >= 5 ? ' IP Anda dikunci selama 10 menit.' : ` (${currentFails}/5 percobaan)`)
+        error: 'Username atau Password/PIN salah!' + 
+          (isSevere ? ' IP Anda telah DIBLOKIR 24 jam.' : (lockedUntil > 0 ? ' IP Anda dikunci selama 15 menit.' : ` (${currentFails}/5 percobaan)`))
       }));
     }
+  }
+
+  async handleApiVerify2Fa(req, res, waClient) {
+    const ip = this.getClientIp(req);
+    const now = Date.now();
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+
+    if (this.verify2FaLimiter.isLimited(ip)) {
+      const waitSec = this.verify2FaLimiter.getResetTime(ip);
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: `Terlalu banyak percobaan verifikasi OTP. Tunggu ${waitSec || 30} detik.` }));
+    }
+
+    let body = {};
+    try {
+      body = await this.readBody(req, 16384);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Payload tidak valid.' }));
+    }
+
+    const twoFaToken = String(body.twoFaToken || '').trim();
+    const otp = String(body.otp || '').trim().replace(/[^0-9]/g, '');
+
+    const pending = this.pending2Fa.get(twoFaToken);
+    if (!pending) {
+      logAuthEvent('2FA_INVALID_TOKEN', ip, 'unknown', 'Token 2FA tidak ditemukan atau telah kedaluwarsa');
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Sesi verifikasi OTP tidak ditemukan atau telah kedaluwarsa. Silakan login kembali.' }));
+    }
+
+    if (now > pending.expiresAt) {
+      this.pending2Fa.delete(twoFaToken);
+      logAuthEvent('2FA_EXPIRED', ip, pending.username, 'Kode OTP kedaluwarsa');
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Kode OTP telah kedaluwarsa (lebih dari 3 menit). Silakan klik Kirim Ulang OTP.' }));
+    }
+
+    pending.attempts = (pending.attempts || 0) + 1;
+    if (pending.attempts > 3) {
+      this.pending2Fa.delete(twoFaToken);
+      logAuthEvent('2FA_MAX_ATTEMPTS', ip, pending.username, 'Batas percobaan tebak OTP terlampaui');
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Batas percobaan OTP terlampaui (maks 3x). Silakan ulangi proses login dari awal.' }));
+    }
+
+    const isOtpValid = safeCompare(otp, pending.otp);
+
+    if (isOtpValid) {
+      this.pending2Fa.delete(twoFaToken);
+      this.createSession(pending.username, req, res);
+      logAuthEvent('2FA_SUCCESS', ip, pending.username, '2FA OTP verified successfully');
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: true, message: 'Verifikasi 2FA berhasil! Mengalihkan ke Dashboard...' }));
+    } else {
+      logAuthEvent('2FA_FAIL', ip, pending.username, `Salah memasukkan kode OTP (percobaan ${pending.attempts}/3)`);
+      await new Promise(r => setTimeout(r, 1200));
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: false,
+        error: `Kode OTP yang Anda masukkan salah! (${pending.attempts}/3 percobaan)`
+      }));
+    }
+  }
+
+  async handleApiResend2Fa(req, res, waClient) {
+    const ip = this.getClientIp(req);
+    const now = Date.now();
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+
+    const lastResend = this.lastOtpResend.get(ip) || 0;
+    if (now - lastResend < 45 * 1000) {
+      const waitSec = Math.ceil((45 * 1000 - (now - lastResend)) / 1000);
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: `Mohon tunggu ${waitSec} detik sebelum meminta kode OTP baru.` }));
+    }
+
+    let body = {};
+    try {
+      body = await this.readBody(req, 16384);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Payload tidak valid.' }));
+    }
+
+    const twoFaToken = String(body.twoFaToken || '').trim();
+    const pending = this.pending2Fa.get(twoFaToken);
+    if (!pending) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Sesi OTP tidak valid. Silakan login kembali.' }));
+    }
+
+    if (!waClient || !waClient.isConnected) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Gateway WhatsApp sedang tidak terhubung.' }));
+    }
+
+    const newOtp = String(crypto.randomInt(100000, 999999));
+    pending.otp = newOtp;
+    pending.expiresAt = now + (3 * 60 * 1000);
+    pending.attempts = 0;
+    this.lastOtpResend.set(ip, now);
+
+    const cleanUa = (req.headers['user-agent'] || 'Browser Web').substring(0, 60);
+    const otpMessage = 
+`🔐 *KODE VERIFIKASI 2FA BARU - SECOPS PORTAL* 🔐
+-----------------------------------------
+Kode OTP Baru: *${newOtp}*
+
+• *Pengguna:* *${pending.username}*
+• *IP Pengakses:* \`${ip}\`
+• *Perangkat:* ${cleanUa}
+• *Masa Berlaku:* 3 Menit
+-----------------------------------------
+⚠️ *JANGAN PERNAH MEMBERIKAN KODE INI KEPADA SIAPA PUN!*`;
+
+    await waClient.broadcastToAdmins(otpMessage);
+    logAuthEvent('2FA_RESENT', ip, pending.username, 'New WhatsApp 2FA OTP re-dispatched');
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: true, message: 'Kode OTP baru telah dikirimkan ke WhatsApp Admin.' }));
   }
 
   handleApiLogout(req, res) {
@@ -562,7 +1016,7 @@ class WebPortal {
 Halo *${contact.name}*,
 Nomor WhatsApp Anda berhasil diverifikasi dan terdaftar sebagai *Penerima Pesan Urgensi* pada sistem keamanan server.
 
-• *Server Koordinator:* ${config.nodeName} (\`${config.nodeId}\`)
+• *Server Koordinator:* ${config.nodeName} (${config.nodeId})
 • *Peran Petugas:* ${contact.role}
 • *Kategori Peringatan:* ${contact.alerts.join(', ').toUpperCase()}
 • *Status Sistem:* 🟢 SIAP & AKTIF OPERASIONAL
@@ -587,33 +1041,142 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
     }
   }
 
-  renderLoginPage(res) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  renderLoginPage(res, req) {
+    const clientIp = this.getClientIp(req);
+    const csrfToken = this.generateLoginCsrf(clientIp);
+
+    res.writeHead(200, { 
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, private'
+    });
     res.end(`<!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Login - SecOps Emergency Alerts Portal</title>
+  <title>Login SecOps Emergency Portal - Zero Trust Shield</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-    body { background: #0b0f19; color: #f1f5f9; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 40px; width: 100%; max-width: 420px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5); }
+    body { 
+      background: radial-gradient(circle at 50% 20%, #1e1b4b 0%, #0b0f19 75%);
+      color: #f1f5f9; 
+      min-height: 100vh; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      padding: 20px; 
+    }
+    .card { 
+      background: rgba(30, 41, 59, 0.75); 
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.1); 
+      border-radius: 20px; 
+      padding: 40px; 
+      width: 100%; 
+      max-width: 440px; 
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 40px rgba(16, 185, 129, 0.15); 
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, #10b981, #3b82f6, #8b5cf6, #10b981);
+      background-size: 300% 100%;
+      animation: gradientBorder 4s linear infinite;
+    }
+    @keyframes gradientBorder {
+      0% { background-position: 0% 0%; }
+      100% { background-position: 300% 0%; }
+    }
     .logo { text-align: center; margin-bottom: 24px; }
-    .logo-icon { font-size: 54px; filter: drop-shadow(0 0 16px rgba(16, 185, 129, 0.4)); display: inline-block; margin-bottom: 8px; }
-    .title { font-size: 22px; font-weight: 700; color: #f8fafc; letter-spacing: -0.5px; }
+    .logo-icon { 
+      font-size: 52px; 
+      filter: drop-shadow(0 0 20px rgba(16, 185, 129, 0.5)); 
+      display: inline-block; 
+      margin-bottom: 8px; 
+    }
+    .title { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: -0.5px; }
     .subtitle { font-size: 13px; color: #94a3b8; margin-top: 4px; }
+    .badge-sec {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #34d399;
+      margin-top: 10px;
+    }
     .form-group { margin-bottom: 18px; }
     label { display: block; font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 6px; }
-    input { width: 100%; padding: 12px 14px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #fff; font-size: 14px; transition: border-color 0.2s, box-shadow 0.2s; }
-    input:focus { outline: none; border-color: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2); }
-    .btn { width: 100%; padding: 12px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #fff; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity 0.2s, transform 0.1s; margin-top: 8px; }
-    .btn:hover { opacity: 0.95; }
-    .btn:active { transform: scale(0.98); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .alert { padding: 12px; border-radius: 8px; font-size: 13px; margin-bottom: 18px; display: none; }
+    input[type="text"], input[type="password"] { 
+      width: 100%; 
+      padding: 13px 15px; 
+      background: #0f172a; 
+      border: 1px solid #334155; 
+      border-radius: 10px; 
+      color: #fff; 
+      font-size: 14px; 
+      transition: all 0.2s; 
+    }
+    input:focus { 
+      outline: none; 
+      border-color: #10b981; 
+      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25); 
+      background: #0b1329;
+    }
+    .btn { 
+      width: 100%; 
+      padding: 13px; 
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%); 
+      color: #fff; 
+      border: none; 
+      border-radius: 10px; 
+      font-size: 15px; 
+      font-weight: 700; 
+      cursor: pointer; 
+      transition: all 0.2s; 
+      margin-top: 8px; 
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+    }
+    .btn:hover { opacity: 0.95; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(16, 185, 129, 0.4); }
+    .btn:active { transform: translateY(1px); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+    .btn-secondary {
+      background: transparent;
+      border: 1px solid #475569;
+      color: #cbd5e1;
+      box-shadow: none;
+      margin-top: 8px;
+    }
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.05); color: #fff; box-shadow: none; }
+    .alert { padding: 13px; border-radius: 10px; font-size: 13px; margin-bottom: 18px; display: none; line-height: 1.4; }
     .alert-error { background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #fca5a5; }
-    .hint { text-align: center; font-size: 12px; color: #64748b; margin-top: 20px; line-height: 1.4; }
+    .alert-info { background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; color: #93c5fd; }
+    .otp-input {
+      letter-spacing: 12px;
+      font-size: 26px !important;
+      text-align: center;
+      font-weight: 800;
+      font-family: monospace;
+      color: #34d399 !important;
+    }
+    .timer-box {
+      text-align: center;
+      font-size: 12px;
+      color: #94a3b8;
+      margin: 12px 0 6px 0;
+    }
+    .timer-countdown { font-weight: 700; color: #fbbf24; }
+    .step-box { display: none; }
+    .step-active { display: block; }
+    .hint { text-align: center; font-size: 11px; color: #64748b; margin-top: 24px; line-height: 1.5; border-top: 1px solid rgba(255, 255, 255, 0.06); padding-top: 16px; }
   </style>
 </head>
 <body>
@@ -621,64 +1184,239 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
     <div class="logo">
       <div class="logo-icon">🛡️</div>
       <h1 class="title">SecOps Emergency Portal</h1>
-      <p class="subtitle">Manajemen Nomor WhatsApp Penerima Urgensi</p>
+      <p class="subtitle">Gerbang Manajemen Notifikasi Urgensi Multi-Server</p>
+      <div class="badge-sec">🔒 ZERO-TRUST MILITARY DEFENSE</div>
     </div>
 
-    <div id="errorBox" class="alert alert-error"></div>
+    <div id="alertBox" class="alert"></div>
 
-    <form id="loginForm">
-      <div class="form-group">
-        <label for="username">Username Admin</label>
-        <input type="text" id="username" name="username" placeholder="admin" required autofocus autocomplete="username">
-      </div>
-      <div class="form-group">
-        <label for="password">Password / Security PIN</label>
-        <input type="password" id="password" name="password" placeholder="Masukkan PIN / Password" required autocomplete="current-password">
-      </div>
-      <button type="submit" id="submitBtn" class="btn">Masuk ke Dashboard</button>
-    </form>
+    <!-- STEP 1: KREDENSIAL UTAMA -->
+    <div id="step1" class="step-box step-active">
+      <form id="loginForm">
+        <!-- Anti-Bot Honeypot Traps (Invisible to humans, filled by bots) -->
+        <input type="text" name="_hp_website" id="hpWebsite" tabindex="-1" autocomplete="off" aria-hidden="true" style="opacity:0;position:absolute;top:0;left:0;height:0;width:0;z-index:-1;pointer-events:none;">
+        <input type="text" name="_hp_sec_code" id="hpSecCode" tabindex="-1" autocomplete="off" aria-hidden="true" style="opacity:0;position:absolute;top:0;left:0;height:0;width:0;z-index:-1;pointer-events:none;">
+        
+        <!-- Cryptographic Anti-Replay & Timing CSRF Token -->
+        <input type="hidden" name="_sec_token" id="secToken" value="${csrfToken}">
+
+        <div class="form-group">
+          <label for="username">Username Admin</label>
+          <input type="text" id="username" name="username" placeholder="admin" required autofocus autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label for="password">Password / Security PIN</label>
+          <input type="password" id="password" name="password" placeholder="Masukkan PIN / Password" required autocomplete="current-password">
+        </div>
+        <button type="submit" id="submitBtn1" class="btn">Lanjutkan Verifikasi ➜</button>
+      </form>
+    </div>
+
+    <!-- STEP 2: OTENTIKASI 2FA WHATSAPP OTP -->
+    <div id="step2" class="step-box">
+      <form id="otpForm">
+        <div style="text-align: center; margin-bottom: 16px;">
+          <div style="font-size: 32px; margin-bottom: 6px;">📲</div>
+          <h3 style="font-size: 16px; font-weight: 700; color: #f8fafc;">Verifikasi 2FA WhatsApp</h3>
+          <p style="font-size: 12px; color: #94a3b8; margin-top: 4px;">
+            Kode OTP 6-digit rahasia telah dikirimkan ke WhatsApp resmi Administrator Server.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label for="otpCode" style="text-align:center;">Masukkan 6 Digit Kode OTP</label>
+          <input type="text" id="otpCode" class="otp-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" placeholder="••••••" autocomplete="one-time-code" required>
+        </div>
+
+        <div class="timer-box">
+          ⏳ Masa aktif kode: <span id="timerCountdown" class="timer-countdown">03:00</span>
+        </div>
+
+        <button type="submit" id="submitBtn2" class="btn">Verifikasi & Buka Dashboard 🛡️</button>
+        <button type="button" id="resendOtpBtn" class="btn btn-secondary">Kirim Ulang Kode OTP</button>
+        <button type="button" id="backToStep1Btn" class="btn btn-secondary" style="font-size: 12px; padding: 8px;">← Kembali ke Kredensial</button>
+      </form>
+    </div>
 
     <p class="hint">
-      🔒 Dilindungi oleh sistem otentikasi sesi Zero-Trust & Rate Limiter.<br>
-      Default PIN: Sesuai <code>SECURITY_PIN</code> server.
+      🛡️ Dilindungi oleh Cloudflare, Fail2ban Firewalld, Rate Limiter, Anti-Bot Honeypot, dan Enkripsi Zero-Trust 2FA. Seluruh percobaan ilegal dicatat dan diblokir secara permanen.
     </p>
   </div>
 
   <script>
-    const form = document.getElementById('loginForm');
-    const errorBox = document.getElementById('errorBox');
-    const submitBtn = document.getElementById('submitBtn');
+    const step1 = document.getElementById('step1');
+    const step2 = document.getElementById('step2');
+    const alertBox = document.getElementById('alertBox');
+    const loginForm = document.getElementById('loginForm');
+    const otpForm = document.getElementById('otpForm');
+    const submitBtn1 = document.getElementById('submitBtn1');
+    const submitBtn2 = document.getElementById('submitBtn2');
+    const resendOtpBtn = document.getElementById('resendOtpBtn');
+    const backToStep1Btn = document.getElementById('backToStep1Btn');
+    const timerCountdown = document.getElementById('timerCountdown');
 
-    form.addEventListener('submit', async (e) => {
+    let currentTwoFaToken = '';
+    let otpExpiresAt = 0;
+    let timerInterval = null;
+
+    function showAlert(msg, isError = true) {
+      alertBox.className = 'alert ' + (isError ? 'alert-error' : 'alert-info');
+      alertBox.innerText = msg;
+      alertBox.style.display = 'block';
+    }
+
+    function hideAlert() {
+      alertBox.style.display = 'none';
+    }
+
+    function startOtpTimer(durationSeconds) {
+      if (timerInterval) clearInterval(timerInterval);
+      otpExpiresAt = Date.now() + (durationSeconds * 1000);
+      updateTimerDisplay();
+
+      timerInterval = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((otpExpiresAt - Date.now()) / 1000));
+        updateTimerDisplay();
+        if (remaining <= 0) {
+          clearInterval(timerInterval);
+          showAlert('Kode OTP telah kedaluwarsa. Silakan klik "Kirim Ulang Kode OTP".', true);
+        }
+      }, 1000);
+    }
+
+    function updateTimerDisplay() {
+      const remaining = Math.max(0, Math.ceil((otpExpiresAt - Date.now()) / 1000));
+      const min = Math.floor(remaining / 60);
+      const sec = remaining % 60;
+      timerCountdown.innerText = String(min).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+    }
+
+    // Step 1: Submit Username & Password
+    loginForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      errorBox.style.display = 'none';
-      submitBtn.disabled = true;
-      submitBtn.innerText = 'Memverifikasi...';
+      hideAlert();
+      submitBtn1.disabled = true;
+      submitBtn1.innerText = 'Memverifikasi Kredensial...';
 
-      const username = document.getElementById('username').value;
-      const password = document.getElementById('password').value;
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value.trim();
+      const _sec_token = document.getElementById('secToken').value;
+      const _hp_website = document.getElementById('hpWebsite').value;
+      const _hp_sec_code = document.getElementById('hpSecCode').value;
 
       try {
         const res = await fetch('/api/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password })
+          body: JSON.stringify({ username, password, _sec_token, _hp_website, _hp_sec_code })
         });
         const data = await res.json();
+
         if (data.success) {
-          window.location.href = '/dashboard';
+          if (data.require2FA) {
+            // Berhasil step 1 -> Pindah ke Step 2 (2FA OTP)
+            currentTwoFaToken = data.twoFaToken;
+            step1.classList.remove('step-active');
+            step2.classList.add('step-active');
+            showAlert(data.message || 'Kode OTP 6-digit telah dikirimkan ke WhatsApp Anda.', false);
+            startOtpTimer(180); // 3 menit
+            document.getElementById('otpCode').value = '';
+            document.getElementById('otpCode').focus();
+          } else {
+            // 2FA tidak aktif -> langsung masuk dashboard
+            window.location.href = '/dashboard';
+          }
         } else {
-          errorBox.innerText = data.error || 'Login gagal!';
-          errorBox.style.display = 'block';
-          submitBtn.disabled = false;
-          submitBtn.innerText = 'Masuk ke Dashboard';
+          showAlert(data.error || 'Login gagal!');
+          submitBtn1.disabled = false;
+          submitBtn1.innerText = 'Lanjutkan Verifikasi ➜';
         }
       } catch (err) {
-        errorBox.innerText = 'Gagal terhubung ke server: ' + err.message;
-        errorBox.style.display = 'block';
-        submitBtn.disabled = false;
-        submitBtn.innerText = 'Masuk ke Dashboard';
+        showAlert('Gagal terhubung ke server: ' + err.message);
+        submitBtn1.disabled = false;
+        submitBtn1.innerText = 'Lanjutkan Verifikasi ➜';
       }
+    });
+
+    // Step 2: Submit 2FA OTP
+    otpForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideAlert();
+      const otp = document.getElementById('otpCode').value.replace(/[^0-9]/g, '');
+      if (otp.length !== 6) {
+        showAlert('Mohon masukkan 6 digit angka kode OTP yang valid.');
+        return;
+      }
+
+      submitBtn2.disabled = true;
+      submitBtn2.innerText = 'Memvalidasi OTP...';
+
+      try {
+        const res = await fetch('/api/login/verify-2fa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ twoFaToken: currentTwoFaToken, otp })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          if (timerInterval) clearInterval(timerInterval);
+          showAlert(data.message || 'Verifikasi 2FA sukses! Mengalihkan...', false);
+          setTimeout(() => {
+            window.location.href = '/dashboard';
+          }, 800);
+        } else {
+          showAlert(data.error || 'Kode OTP tidak cocok.');
+          submitBtn2.disabled = false;
+          submitBtn2.innerText = 'Verifikasi & Buka Dashboard 🛡️';
+        }
+      } catch (err) {
+        showAlert('Gagal verifikasi OTP: ' + err.message);
+        submitBtn2.disabled = false;
+        submitBtn2.innerText = 'Verifikasi & Buka Dashboard 🛡️';
+      }
+    });
+
+    // Kirim Ulang OTP
+    resendOtpBtn.addEventListener('click', async () => {
+      hideAlert();
+      resendOtpBtn.disabled = true;
+      resendOtpBtn.innerText = 'Mengirim Ulang...';
+
+      try {
+        const res = await fetch('/api/login/resend-2fa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ twoFaToken: currentTwoFaToken })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          showAlert(data.message || 'Kode OTP baru telah dikirimkan ke WhatsApp Anda.', false);
+          startOtpTimer(180);
+        } else {
+          showAlert(data.error || 'Gagal mengirim ulang OTP.');
+        }
+      } catch (err) {
+        showAlert('Error: ' + err.message);
+      } finally {
+        setTimeout(() => {
+          resendOtpBtn.disabled = false;
+          resendOtpBtn.innerText = 'Kirim Ulang Kode OTP';
+        }, 15000);
+      }
+    });
+
+    // Kembali ke Step 1
+    backToStep1Btn.addEventListener('click', () => {
+      if (timerInterval) clearInterval(timerInterval);
+      hideAlert();
+      step2.classList.remove('step-active');
+      step1.classList.add('step-active');
+      submitBtn1.disabled = false;
+      submitBtn1.innerText = 'Lanjutkan Verifikasi ➜';
+      document.getElementById('password').value = '';
+      document.getElementById('password').focus();
     });
   </script>
 </body>
