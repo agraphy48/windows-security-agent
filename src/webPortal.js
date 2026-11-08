@@ -209,10 +209,15 @@ class WebPortal {
     const method = req.method.toUpperCase();
 
     // 1. Static / Public Routes
-    if (url === '/login' && method === 'GET') {
+    if (url === '/login' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);
       if (session) {
         res.writeHead(302, { Location: '/dashboard' });
+        res.end();
+        return true;
+      }
+      if (method === 'HEAD') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end();
         return true;
       }
@@ -230,7 +235,7 @@ class WebPortal {
       return true;
     }
 
-    if (url === '/' && method === 'GET') {
+    if (url === '/' && (method === 'GET' || method === 'HEAD')) {
       // Jika WhatsApp belum terhubung dan ada QR code
       if (!waClient.isConnected && waClient.currentQrDataUrl) {
         this.renderQrPage(res, waClient);
@@ -247,16 +252,26 @@ class WebPortal {
       return true;
     }
 
-    if (url === '/qr' && method === 'GET') {
+    if (url === '/qr' && (method === 'GET' || method === 'HEAD')) {
+      if (method === 'HEAD') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end();
+        return true;
+      }
       this.renderQrPage(res, waClient);
       return true;
     }
 
     // 2. Protected Routes (Harus Login)
-    if (url === '/dashboard' && method === 'GET') {
+    if (url === '/dashboard' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);
       if (!session) {
         res.writeHead(302, { Location: '/login' });
+        res.end();
+        return true;
+      }
+      if (method === 'HEAD') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end();
         return true;
       }
