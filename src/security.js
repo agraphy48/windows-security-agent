@@ -1,6 +1,7 @@
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const config = require('./config');
 
 const isWindows = process.platform === 'win32';
@@ -229,14 +230,23 @@ EOF
       `;
       const raw = await runBash(bashCmd);
       if (!raw) return [];
-      const lines = raw.split('\n').filter(Boolean);
-      return lines.map((line, idx) => ({
-        DetectionID: `f2b-${Date.now()}-${idx}`,
-        ThreatName: 'SSH Brute-Force Attempt (Blocked)',
-        Time: new Date().toISOString().replace('T', ' ').substring(0, 19),
-        Resources: line.trim(),
-        Remediated: true
-      }));
+      const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+      return lines.map((line) => {
+        // Buat ID stabil dari hash isi baris log asli (mencegah ID acak yang memicu spam alert berulang-ulang)
+        const stableId = 'f2b-' + crypto.createHash('md5').update(line).digest('hex').substring(0, 16);
+        let logTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        const timeMatch = line.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/);
+        if (timeMatch) {
+          logTime = timeMatch[1];
+        }
+        return {
+          DetectionID: stableId,
+          ThreatName: 'SSH Brute-Force Attempt (Blocked)',
+          Time: logTime,
+          Resources: line,
+          Remediated: true
+        };
+      });
     } catch {
       return [];
     }

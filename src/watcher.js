@@ -9,10 +9,12 @@ class SecurityWatcher {
     this.seenThreats = new Set();
     this.knownServices = new Map();
     this.inventoryPath = path.join(__dirname, '..', 'inventory', 'services_inventory.json');
+    this.threatsPath = path.join(__dirname, '..', 'inventory', 'seen_threats.json');
     this.lastCpuAlert = 0;
     this.highCpuStreak = 0;
     this.intervalId = null;
     this.initialized = false;
+    this.recentAlertTimestamps = []; // Throttling: max 3 alerts per 5 menit
   }
 
   start() {
@@ -39,13 +41,45 @@ class SecurityWatcher {
 
   async initExistingThreats() {
     try {
-      const threats = await security.getRecentThreats(10);
+      const invDir = path.dirname(this.threatsPath);
+      if (!fs.existsSync(invDir)) {
+        fs.mkdirSync(invDir, { recursive: true });
+      }
+
+      // 1. Muat database ancaman yang sudah pernah dilihat sebelumnya dari disk
+      if (fs.existsSync(this.threatsPath)) {
+        try {
+          const raw = fs.readFileSync(this.threatsPath, 'utf8');
+          const list = JSON.parse(raw);
+          if (Array.isArray(list)) {
+            for (const id of list) this.seenThreats.add(id);
+          }
+        } catch (e) {}
+      }
+
+      // 2. Ambil seluruh riwayat ancaman yang sudah ada di log sistem saat ini (sampai 50 item)
+      // dan tandai semua sebagai "sudah dilihat" agar tidak memicu alert masa lampau saat reboot!
+      const threats = await security.getRecentThreats(50);
       for (const t of threats) {
         if (t.DetectionID) this.seenThreats.add(t.DetectionID);
       }
-      console.log(`[🛡️ Watcher] Database ancaman awal dimuat: ${this.seenThreats.size} ancaman lampau.`);
+
+      this.saveSeenThreats();
+      console.log(`[🛡️ Watcher] Database ancaman awal dimuat: ${this.seenThreats.size} ancaman lampau dicatat.`);
     } catch (err) {
       console.error('[🛡️ Watcher] Gagal inisialisasi ancaman:', err.message);
+    }
+  }
+
+  saveSeenThreats() {
+    try {
+      const invDir = path.dirname(this.threatsPath);
+      if (!fs.existsSync(invDir)) {
+        fs.mkdirSync(invDir, { recursive: true });
+      }
+      fs.writeFileSync(this.threatsPath, JSON.stringify(Array.from(this.seenThreats), null, 2), 'utf8');
+    } catch (err) {
+      console.error('[🛡️ Watcher] Gagal menyimpan seen_threats:', err.message);
     }
   }
 
@@ -114,9 +148,11 @@ class SecurityWatcher {
 
   async checkNewThreats() {
     const threats = await security.getRecentThreats(5);
+    let hasNew = false;
     for (const t of threats) {
       if (t.DetectionID && !this.seenThreats.has(t.DetectionID)) {
         this.seenThreats.add(t.DetectionID);
+        hasNew = true;
 
         const alertMessage = 
 `🚨 *PERINGATAN VIRUS/MALWARE BARU!* 🚨
@@ -132,6 +168,9 @@ Ketik *threats* atau *node ${config.nodeId} threats* untuk riwayat lengkap.`;
 
         await this.broadcastAlert(alertMessage);
       }
+    }
+    if (hasNew) {
+      this.saveSeenThreats();
     }
   }
 
@@ -206,6 +245,15 @@ Ketik *status* atau *node ${config.nodeId} status* untuk cek proses aktif.`;
   }
 
   async broadcastAlert(message, category = 'all') {
+    const now = Date.now();
+    // Throttling: Jangan kirim lebih dari 5 alert dalam 2 menit agar WhatsApp tidak banjir spam
+    this.recentAlertTimestamps = this.recentAlertTimestamps.filter(t => now - t < 2 * 60 * 1000);
+    if (this.recentAlertTimestamps.length >= 5) {
+      console.warn(`[⚠️ Watcher Throttling] Melebihi batas kirim alert (5 per 2 menit). Ditunda: ${message.substring(0, 60)}...`);
+      return;
+    }
+    this.recentAlertTimestamps.push(now);
+
     console.log(`[🔔 Security Alert]\n${message}`);
     if (!this.wa || !this.wa.sock) {
       // Jika node ini adalah worker/standby tanpa WA socket aktif, teruskan alert ke Master
