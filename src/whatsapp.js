@@ -22,6 +22,9 @@ class WhatsAppClient {
     this.adminSessions = new Map(); // cleanSender -> lastAuthTimestamp
     this.intruderAlerts = new Map(); // cleanSender -> lastAlertTimestamp
     this.userMenuState = new Map(); // cleanSender -> { step: 'CHOOSE_SERVER' | 'SERVER_ACTIONS', targetNodeId, targetNodeName, serverList }
+    this.lastPairingCode = null;
+    this.pairingExpiresAt = 0;
+    this.pairingPhone = null;
   }
 
   async start() {
@@ -112,6 +115,9 @@ class WhatsAppClient {
       } else if (connection === 'open') {
         this.isConnected = true;
         this.currentQrDataUrl = null;
+        this.lastPairingCode = null;
+        this.pairingExpiresAt = 0;
+        this.pairingPhone = null;
         console.log('\n================================================================');
         console.log('🎉 WHATSAPP SECURITY AGENT BERHASIL TERHUBUNG!');
         console.log(`Admin terdaftar: ${config.adminNumbers.length > 0 ? config.adminNumbers.join(', ') : '(Belum ada - Nomor yang pertama kirim pesan akan dijadikan admin)'}`);
@@ -126,6 +132,129 @@ class WhatsAppClient {
         await this.handleIncomingMessage(msg);
       }
     });
+  }
+
+  getBotStatus() {
+    let botNumber = null;
+    let botName = null;
+    const hasUser = !!(this.sock && this.sock.user);
+    if (hasUser) {
+      botNumber = this.sock.user.id ? this.sock.user.id.split('@')[0].split(':')[0] : null;
+      botName = this.sock.user.name || null;
+    }
+    const isConnected = this.isConnected || hasUser;
+    const isPairingActive = Date.now() < this.pairingExpiresAt;
+    return {
+      isConnected,
+      botNumber,
+      botName,
+      hasQr: !!this.currentQrDataUrl,
+      isPairingActive,
+      lastPairingCode: isPairingActive ? this.lastPairingCode : null,
+      pairingPhone: isPairingActive ? this.pairingPhone : null,
+      pairingExpiresIn: isPairingActive ? Math.ceil((this.pairingExpiresAt - Date.now()) / 1000) : 0
+    };
+  }
+
+  async getQrDataUrl() {
+    if (!this.sock && !this.isConnected) {
+      try {
+        await this.initBaileys();
+        await new Promise(r => setTimeout(r, 2000));
+      } catch (err) {
+        console.error('[WA Gateway] Gagal inisialisasi QR:', err.message);
+      }
+    }
+    return this.currentQrDataUrl;
+  }
+
+  async requestPairingCode(phoneNumber) {
+    if (this.isConnected) {
+      throw new Error('Bot saat ini sedang terhubung. Untuk menautkan nomor baru, silakan putuskan (logout) sesi terlebih dahulu.');
+    }
+    if (!phoneNumber) {
+      throw new Error('Nomor WhatsApp harus diisi.');
+    }
+    let clean = phoneNumber.replace(/[^0-9]/g, '');
+    if (clean.startsWith('08')) {
+      clean = '628' + clean.slice(2);
+    } else if (!clean.startsWith('62') && clean.startsWith('8')) {
+      clean = '62' + clean;
+    }
+    if (clean.length < 10 || clean.length > 15) {
+      throw new Error('Nomor telepon tidak valid. Gunakan format internasional atau lokal (contoh: 08123456789 atau 628123456789).');
+    }
+
+    if (!this.sock) {
+      await this.initBaileys();
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    try {
+      const rawCode = await this.sock.requestPairingCode(clean);
+      let formattedCode = rawCode;
+      if (rawCode && rawCode.length === 8) {
+        formattedCode = `${rawCode.substring(0, 4)}-${rawCode.substring(4)}`;
+      }
+      this.lastPairingCode = formattedCode;
+      this.pairingPhone = clean;
+      this.pairingExpiresAt = Date.now() + (60 * 1000); // 60 detik
+      console.log(`[WA Gateway] Kode pairing dibuat untuk +${clean}: ${formattedCode}`);
+      return {
+        success: true,
+        pairingCode: formattedCode,
+        rawCode,
+        targetNumber: clean,
+        expiresInSeconds: 60
+      };
+    } catch (err) {
+      console.error('[WA Gateway] Gagal request pairing code:', err);
+      throw new Error(`Gagal meminta kode pairing: ${err.message}`);
+    }
+  }
+
+  async logoutBot() {
+    console.log('[WA Gateway] Memutuskan sesi bot atas permintaan web portal...');
+    try {
+      if (this.sock) {
+        try {
+          await this.sock.logout('Admin initiated logout from web portal');
+        } catch (e) {
+          console.log('[WA Gateway] Notice sock logout:', e.message);
+        }
+        try {
+          this.sock.end(new Error('Logout by admin'));
+        } catch {}
+      }
+    } catch (err) {
+      console.log('[WA Gateway] Warning saat logout:', err.message);
+    }
+
+    this.isConnected = false;
+    this.currentQrDataUrl = null;
+    this.lastPairingCode = null;
+    this.pairingExpiresAt = 0;
+    this.pairingPhone = null;
+
+    // Bersihkan sesi di folder disk
+    try {
+      if (fs.existsSync(config.sessionDir)) {
+        fs.rmSync(config.sessionDir, { recursive: true, force: true });
+        console.log('[WA Gateway] Folder session auth berhasil dibersihkan.');
+      }
+    } catch (e) {
+      console.error('[WA Gateway] Gagal bersihkan session dir:', e.message);
+    }
+
+    // Inisialisasi ulang socket bersih
+    setTimeout(() => {
+      this.initBaileys();
+    }, 1500);
+
+    return {
+      success: true,
+      message: 'Sesi bot berhasil diputuskan. Silakan masukkan nomor baru untuk meminta kode pairing atau scan QR.'
+    };
   }
 
   async handleIncomingMessage(msg) {

@@ -199,6 +199,49 @@ class WebPortal {
         await this.handleApiTestContact(req, res, id, waClient);
         return true;
       }
+
+      // 4. API Manajemen Gateway Bot WhatsApp Pengirim (Pairing Code & QR)
+      if (url === '/api/bot/status' && method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, ...waClient.getBotStatus() }));
+        return true;
+      }
+
+      if (url === '/api/bot/pair' && method === 'POST') {
+        const body = await this.readBody(req);
+        try {
+          const result = await waClient.requestPairingCode(body.phoneNumber);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return true;
+      }
+
+      if (url === '/api/bot/logout' && method === 'POST') {
+        try {
+          const result = await waClient.logoutBot();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return true;
+      }
+
+      if (url === '/api/bot/qr' && method === 'GET') {
+        const qr = await waClient.getQrDataUrl();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          isConnected: waClient.isConnected,
+          qr: qr || null
+        }));
+        return true;
+      }
     }
 
     return false; // Bukan request web portal
@@ -562,6 +605,11 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
     .fleet-status { display: inline-flex; align-items: center; gap: 6px; }
     .dot-online { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 8px var(--primary); }
     .dot-offline { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+
+    /* Tabs & Gateway Bot */
+    .tab-btn { background: transparent; color: #94a3b8; border: none; border-bottom: 2px solid transparent; padding: 10px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .tab-btn:hover { color: #f8fafc; }
   </style>
 </head>
 <body>
@@ -602,6 +650,109 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         <div>
           <div id="statFleetCount" class="stat-value">-</div>
           <div class="stat-label">Server Terhubung di Cluster</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kartu Gateway Bot WhatsApp Pengirim -->
+    <div class="card" style="margin-bottom: 24px; border-left: 4px solid var(--primary);">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
+        <div>
+          <h2 class="card-title" style="margin-bottom:4px;">🤖 Gateway Akun WhatsApp Pengirim (Bot Sender)</h2>
+          <p style="font-size:12px;color:var(--text-muted);">
+            Nomor WhatsApp yang digunakan oleh sistem untuk mengirimkan peringatan darurat & interaksi chatbot ke tim SecOps.
+          </p>
+        </div>
+        <div id="botStatusBadge">
+          <span class="badge" style="background:#374151;color:#9ca3af;font-size:12px;padding:6px 12px;">⏳ Mengecek status gateway...</span>
+        </div>
+      </div>
+
+      <!-- Tampilan Jika Bot SUDAH Terhubung -->
+      <div id="botConnectedBox" style="display:none;background:#0f172a;border:1px solid #334155;border-radius:10px;padding:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;">
+          <div>
+            <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Nomor Bot Pengirim Aktif:</div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span style="font-size:22px;font-weight:700;color:#34d399;font-family:monospace;" id="botActiveNumber">+62xxxxxxxxxx</span>
+              <span id="botActiveName" class="badge" style="background:#064e3b;color:#a7f3d0;font-size:12px;">SecOps Agent Bot</span>
+            </div>
+            <p style="font-size:12px;color:#64748b;margin-top:6px;">
+              🛡️ Semua notifikasi insiden serangan, status server down/pulih, dan balasan chatbot dikirim melalui nomor ini.
+            </p>
+          </div>
+          <div>
+            <button onclick="handleBotLogout()" class="btn-action btn-delete" style="padding:10px 16px;font-size:13px;border-radius:8px;">
+              🔄 Putuskan & Ganti Nomor Pengirim
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tampilan Jika Bot BELUM Terhubung (Form Pairing Code & QR) -->
+      <div id="botDisconnectedBox" style="display:none;">
+        <div style="display:flex;gap:8px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:10px;">
+          <button id="tabBtnPairing" onclick="switchBotTab('pairing')" class="tab-btn active">⚡ Tautkan No. HP (Pairing Code - Tanpa Kamera)</button>
+          <button id="tabBtnQr" onclick="switchBotTab('qr')" class="tab-btn">📷 Scan QR Code</button>
+        </div>
+
+        <!-- Tab 1: Pairing Code -->
+        <div id="tabContentPairing">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(320px, 1fr));gap:24px;align-items:start;">
+            <div>
+              <form id="pairBotForm">
+                <div class="form-group">
+                  <label for="botPairNumber">Masukkan Nomor WhatsApp yang Ingin Dijadikan Pengirim:</label>
+                  <input type="text" id="botPairNumber" placeholder="Contoh: 08123456789 atau 628123456789" required>
+                  <span style="font-size:11px;color:var(--text-muted);margin-top:4px;display:block;">
+                    Gunakan nomor WhatsApp aktif di ponsel Anda (nomor pribadi / bot kantor).
+                  </span>
+                </div>
+                <button type="submit" id="btnRequestPair" class="btn-primary" style="padding:12px;background:linear-gradient(135deg, #10b981 0%, #059669 100%);">
+                  ⚡ Dapatkan 8-Digit Kode Pairing
+                </button>
+              </form>
+            </div>
+
+            <!-- Box Hasil Kode Pairing -->
+            <div>
+              <div id="pairingCodeBox" style="display:none;background:#090d16;border:2px dashed #10b981;border-radius:12px;padding:20px;text-align:center;">
+                <div style="font-size:12px;color:#a7f3d0;margin-bottom:8px;font-weight:600;">MASUKKAN KODE INI KE WHATSAPP ANDA:</div>
+                <div id="pairingCodeDisplay" style="font-size:32px;font-weight:800;letter-spacing:6px;color:#34d399;font-family:monospace;margin:10px 0;">
+                  ---- ----
+                </div>
+                <div style="display:flex;justify-content:center;gap:10px;margin-bottom:12px;">
+                  <button onclick="copyPairingCode()" class="btn-action btn-test" style="padding:6px 14px;">📋 Salin Kode</button>
+                  <span id="pairingCountdown" style="font-size:12px;color:#fbbf24;display:flex;align-items:center;">⏳ Berlaku 60s</span>
+                </div>
+                <div style="text-align:left;background:#0f172a;padding:12px;border-radius:8px;font-size:11px;color:#94a3b8;line-height:1.6;">
+                  <b>Langkah di Ponsel:</b><br>
+                  1. Buka aplikasi WhatsApp &gt; Ketuk Titik Tiga / Pengaturan<br>
+                  2. Pilih <b>Perangkat Tertaut</b> &gt; <b>Tautkan Perangkat</b><br>
+                  3. Pilih opsi <b>"Tautkan dengan nomor telepon saja"</b> di bagian bawah<br>
+                  4. Ketikkan 8 karakter kode di atas. Bot seketika online!
+                </div>
+              </div>
+
+              <div id="pairingCodePlaceholder" style="background:#0f172a;border:1px solid #334155;border-radius:12px;padding:24px;text-align:center;color:#64748b;font-size:13px;">
+                💡 Masukkan nomor WhatsApp di samping kiri lalu klik tombol untuk meminta kode pairing resmi dari WhatsApp server tanpa perlu mengarahkan kamera.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: QR Code Scan -->
+        <div id="tabContentQr" style="display:none;text-align:center;padding:20px 0;">
+          <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">
+            Arahkan kamera WhatsApp di ponsel ke QR Code berikut:
+          </p>
+          <div id="qrImageContainer" style="background:#fff;padding:16px;display:inline-block;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.5);">
+            <div id="qrLoadingText" style="color:#000;font-size:13px;padding:50px;">Memuat QR Code...</div>
+            <img id="botQrImg" src="" alt="WhatsApp QR" style="display:none;width:240px;height:240px;">
+          </div>
+          <div style="margin-top:16px;">
+            <button onclick="loadBotQr()" class="btn-action btn-toggle" style="padding:8px 16px;">🔄 Perbarui QR Code</button>
+          </div>
         </div>
       </div>
     </div>
@@ -922,10 +1073,181 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
       }
     }
 
+    // ==========================================
+    // LOGIKA GATEWAY BOT WHATSAPP PENGIRIM
+    // ==========================================
+    let currentRawPairingCode = '';
+    let pairingTimerInterval = null;
+
+    function switchBotTab(tab) {
+      const tabPairing = document.getElementById('tabContentPairing');
+      const tabQr = document.getElementById('tabContentQr');
+      const btnPairing = document.getElementById('tabBtnPairing');
+      const btnQr = document.getElementById('tabBtnQr');
+
+      if (tab === 'pairing') {
+        tabPairing.style.display = 'block';
+        tabQr.style.display = 'none';
+        btnPairing.classList.add('active');
+        btnQr.classList.remove('active');
+      } else {
+        tabPairing.style.display = 'none';
+        tabQr.style.display = 'block';
+        btnPairing.classList.remove('active');
+        btnQr.classList.add('active');
+        loadBotQr();
+      }
+    }
+
+    async function loadBotStatus() {
+      try {
+        const res = await fetch('/api/bot/status');
+        const data = await res.json();
+        const badge = document.getElementById('botStatusBadge');
+        const connectedBox = document.getElementById('botConnectedBox');
+        const disconnectedBox = document.getElementById('botDisconnectedBox');
+
+        if (data.isConnected) {
+          badge.innerHTML = '<span class="badge badge-active" style="font-size:12px;padding:6px 12px;">🟢 ONLINE (TERHUBUNG)</span>';
+          connectedBox.style.display = 'block';
+          disconnectedBox.style.display = 'none';
+          document.getElementById('botActiveNumber').innerText = data.botNumber ? '+' + data.botNumber : 'WhatsApp Aktif';
+          document.getElementById('botActiveName').innerText = data.botName ? data.botName : 'SecOps Agent Bot';
+          if (pairingTimerInterval) clearInterval(pairingTimerInterval);
+        } else {
+          badge.innerHTML = '<span class="badge" style="background:#7f1d1d;color:#fca5a5;font-size:12px;padding:6px 12px;">🔴 TERPUTUS / BELUM TERTAUT</span>';
+          connectedBox.style.display = 'none';
+          disconnectedBox.style.display = 'block';
+
+          if (data.isPairingActive && data.lastPairingCode) {
+            showPairingCodeUI(data.lastPairingCode, data.pairingExpiresIn);
+          }
+        }
+      } catch (err) {
+        console.error('Error load bot status:', err);
+      }
+    }
+
+    function showPairingCodeUI(code, expiresInSec) {
+      currentRawPairingCode = code.replace(/[^a-zA-Z0-9]/g, '');
+      document.getElementById('pairingCodeDisplay').innerText = code;
+      document.getElementById('pairingCodeBox').style.display = 'block';
+      document.getElementById('pairingCodePlaceholder').style.display = 'none';
+
+      if (pairingTimerInterval) clearInterval(pairingTimerInterval);
+      let secLeft = expiresInSec || 60;
+      const countdownEl = document.getElementById('pairingCountdown');
+      countdownEl.innerText = '⏳ Berlaku ' + secLeft + 's';
+
+      pairingTimerInterval = setInterval(() => {
+        secLeft--;
+        if (secLeft <= 0) {
+          clearInterval(pairingTimerInterval);
+          countdownEl.innerText = '⚠️ Kadaluarsa. Minta ulang.';
+        } else {
+          countdownEl.innerText = '⏳ Berlaku ' + secLeft + 's';
+        }
+      }, 1000);
+    }
+
+    function copyPairingCode() {
+      if (!currentRawPairingCode) return;
+      navigator.clipboard.writeText(currentRawPairingCode).then(() => {
+        showToast('📋 Kode pairing ' + currentRawPairingCode + ' disalin!');
+      }).catch(() => {
+        showToast('Kode: ' + currentRawPairingCode);
+      });
+    }
+
+    document.getElementById('pairBotForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('btnRequestPair');
+      const input = document.getElementById('botPairNumber');
+      const phoneNumber = input.value.trim();
+      if (!phoneNumber) return;
+
+      btn.disabled = true;
+      btn.innerText = '⚡ Menghubungkan ke WhatsApp Server...';
+
+      try {
+        const res = await fetch('/api/bot/pair', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phoneNumber })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast('✅ Kode pairing berhasil dibuat!');
+          showPairingCodeUI(data.pairingCode, data.expiresInSeconds);
+          // Polling status koneksi otomatis
+          const pollInterval = setInterval(async () => {
+            const checkRes = await fetch('/api/bot/status');
+            const checkData = await checkRes.json();
+            if (checkData.isConnected) {
+              clearInterval(pollInterval);
+              showToast('🎉 WhatsApp Bot Pengirim Berhasil Terhubung!');
+              loadBotStatus();
+            }
+          }, 3000);
+          setTimeout(() => clearInterval(pollInterval), 90000);
+        } else {
+          showToast('❌ Gagal: ' + (data.error || 'Terjadi kesalahan'), true);
+        }
+      } catch (err) {
+        showToast('❌ Error: ' + err.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '⚡ Dapatkan 8-Digit Kode Pairing';
+      }
+    });
+
+    async function handleBotLogout() {
+      if (!confirm('Apakah Anda yakin ingin memutuskan sesi WhatsApp Bot Pengirim? Bot tidak akan dapat mengirim pesan notifikasi darurat sampai nomor baru ditautkan.')) {
+        return;
+      }
+      showToast('⏳ Memutuskan sesi WhatsApp Bot...');
+      try {
+        const res = await fetch('/api/bot/logout', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast('✅ Sesi bot berhasil diputuskan. Silakan masukkan nomor baru.');
+          setTimeout(loadBotStatus, 1500);
+        } else {
+          showToast('❌ Gagal: ' + data.error, true);
+        }
+      } catch (err) {
+        showToast('❌ Error: ' + err.message, true);
+      }
+    }
+
+    async function loadBotQr() {
+      const qrImg = document.getElementById('botQrImg');
+      const loading = document.getElementById('qrLoadingText');
+      try {
+        const res = await fetch('/api/bot/qr');
+        const data = await res.json();
+        if (data.isConnected) {
+          loadBotStatus();
+        } else if (data.qr) {
+          qrImg.src = data.qr;
+          qrImg.style.display = 'block';
+          loading.style.display = 'none';
+        } else {
+          loading.innerText = 'Menunggu QR Code dari WhatsApp...';
+          qrImg.style.display = 'none';
+          loading.style.display = 'block';
+        }
+      } catch (err) {
+        loading.innerText = 'Gagal memuat QR: ' + err.message;
+      }
+    }
+
     // Inisialisasi awal
     toggleAlertCheckboxes(document.getElementById('alertAll'));
     loadStatus();
     loadContacts();
+    loadBotStatus();
+    setInterval(loadBotStatus, 10000);
   </script>
 </body>
 </html>`);
