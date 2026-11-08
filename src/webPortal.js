@@ -356,9 +356,14 @@ Nomor WhatsApp Anda berhasil diverifikasi dan terdaftar sebagai *Penerima Pesan 
 _Pesan ini dikirim sebagai pengujian koneksi darurat dari Web Management Portal._
 Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
 
+    let cleanMessage = String(testMessage || '').trim();
+    if (!cleanMessage) {
+      cleanMessage = `🧪 *UJI COBA NOTIFIKASI DARURAT SECOPS AGENT*\n\nHalo ${contact.name}, ini adalah pesan verifikasi jalur darurat server.`;
+    }
+
     try {
       const jid = `${contact.number}@s.whatsapp.net`;
-      await waClient.sock.sendMessage(jid, { text: testMessage });
+      await waClient.sock.sendMessage(jid, { text: cleanMessage });
       contactsManager.updateLastAlert(contact.number);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: true, message: `Pesan uji coba berhasil dikirim ke ${contact.name} (${contact.number})!` }));

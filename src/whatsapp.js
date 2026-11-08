@@ -1259,7 +1259,14 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
   async reply(jid, text) {
     if (!this.sock) return;
     try {
-      await this.sock.sendMessage(jid, { text });
+      if (typeof text !== 'string') {
+        text = text ? String(text) : '';
+      }
+      if (!text || text.trim() === '') {
+        console.warn(`[WA] Mencoba membalas ke ${jid} dengan pesan kosong, dibatalkan.`);
+        return;
+      }
+      await this.sock.sendMessage(jid, { text: text.trim() });
     } catch (err) {
       console.error(`[WA] Gagal membalas ke ${jid}:`, err.message);
     }
@@ -1270,11 +1277,18 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
       console.warn('[WA Broadcast] Tidak dapat mengirim pesan: WhatsApp sock belum siap.');
       return;
     }
+    if (typeof message !== 'string') {
+      message = message ? String(message) : '';
+    }
+    if (!message || message.trim() === '') {
+      console.warn('[WA Broadcast] Pesan broadcast kosong, dibatalkan.');
+      return;
+    }
     const recipients = contactsManager.getActiveNumbers(category);
     for (const number of recipients) {
       try {
         const jid = `${number}@s.whatsapp.net`;
-        await this.sock.sendMessage(jid, { text: message });
+        await this.sock.sendMessage(jid, { text: message.trim() });
         contactsManager.updateLastAlert(number);
       } catch (err) {
         console.error(`[WA Broadcast] Gagal kirim notif ke ${number}:`, err.message);
