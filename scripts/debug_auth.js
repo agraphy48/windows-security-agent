@@ -6,6 +6,16 @@ const credsPath = path.join(rootDir, 'session_auth', 'creds.json');
 const envPath = path.join(rootDir, '.env');
 const contactsPath = path.join(rootDir, 'inventory', 'emergency_contacts.json');
 
+// Ensure KNOWN_WORKERS in .env
+if (fs.existsSync(envPath)) {
+  let env = fs.readFileSync(envPath, 'utf8');
+  if (!env.includes('KNOWN_WORKERS=')) {
+    env += '\nKNOWN_WORKERS=http://100.110.122.22:5005\n';
+    fs.writeFileSync(envPath, env, 'utf8');
+    console.log('[Env] Appended KNOWN_WORKERS to .env');
+  }
+}
+
 // Auto-attach LID to contacts if needed
 if (fs.existsSync(contactsPath)) {
   const d = JSON.parse(fs.readFileSync(contactsPath, 'utf8'));
@@ -19,6 +29,7 @@ if (fs.existsSync(contactsPath)) {
 }
 
 const config = require('../src/config');
+const cluster = require('../src/cluster');
 const contactsManager = require('../src/contacts');
 
 console.log('=== DEBUG AUTH & BOT SESSION ===');
@@ -35,5 +46,7 @@ if (fs.existsSync(credsPath)) {
 console.log('[Config] adminNumbers:', config.adminNumbers);
 console.log('[Config] isAdmin(6285378587299@s.whatsapp.net):', config.isAdmin('6285378587299@s.whatsapp.net'));
 console.log('[Config] isAdmin(135463369228519@lid):', config.isAdmin('135463369228519@lid'));
-console.log('[Contacts] isEmergencyContact(135463369228519):', contactsManager.isEmergencyContact('135463369228519'));
-console.log('[Contacts] isEmergencyContact(6285378587299):', contactsManager.isEmergencyContact('6285378587299'));
+console.log('[Cluster] Total nodes:', cluster.nodes.size);
+for (const [id, n] of cluster.nodes.entries()) {
+  console.log(`  - ${n.name} (${id}): ${n.status} (${n.url})`);
+}
