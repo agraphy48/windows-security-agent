@@ -56,6 +56,7 @@ class ClusterManager {
       this.startMasterWatcher();
     } else if (this.role === 'standby') {
       await this.registerWithMaster();
+      this.startWorkerHeartbeat();
       this.startStandbyFailoverWatcher();
     } else if (this.role === 'worker') {
       await this.registerWithMaster();
