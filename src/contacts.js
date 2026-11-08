@@ -172,3 +172,4 @@ class ContactsManager {
 }
 
 module.exports = new ContactsManager();
+
