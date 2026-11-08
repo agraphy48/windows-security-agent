@@ -379,15 +379,39 @@ EOF
    * Blokir IP di Firewall (Windows Firewall vs UFW / IPTables Linux)
    */
   async blockIp(ip) {
-    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+    if (!ip || typeof ip !== 'string') {
       return 'Format IP tidak valid.';
     }
 
+    const cleanIp = ip.trim();
+    const parts = cleanIp.split('.');
+    if (parts.length !== 4) {
+      return 'Format IP tidak valid (harus IPv4 4-oktet).';
+    }
+
+    for (const part of parts) {
+      if (!/^\d{1,3}$/.test(part)) return 'Format IP tidak valid.';
+      const num = parseInt(part, 10);
+      if (num < 0 || num > 255) {
+        return 'Format IP tidak valid (oktet harus 0-255).';
+      }
+    }
+
+    // Proteksi Self-DoS: Jangan izinkan pemblokiran loopback atau node cluster kritis
+    const isLoopback = cleanIp === '127.0.0.1' || cleanIp.startsWith('127.');
+    const isBroadcast = cleanIp === '0.0.0.0' || cleanIp === '255.255.255.255';
+    const isClusterMaster = cleanIp === '62.72.20.122';
+    const isLocalGateway = cleanIp === '192.168.18.1';
+
+    if (isLoopback || isBroadcast || isClusterMaster || isLocalGateway) {
+      return `⚠️ Pemblokiran IP ${cleanIp} ditolak untuk mencegah gangguan operasional pada infrastruktur server / cluster.`;
+    }
+
     if (isWindows) {
-      const ruleName = `Block-Agent-${ip}`;
+      const ruleName = `Block-Agent-${cleanIp}`;
       const script = `
-        New-NetFirewallRule -DisplayName "${ruleName}" -Direction Inbound -Action Block -RemoteAddress "${ip}" -Description "Blocked by Security Agent via WhatsApp"
-        "IP $ip berhasil diblokir di Windows Firewall."
+        New-NetFirewallRule -DisplayName "${ruleName}" -Direction Inbound -Action Block -RemoteAddress "${cleanIp}" -Description "Blocked by Security Agent via WhatsApp"
+        "IP $cleanIp berhasil diblokir di Windows Firewall."
       `;
       try {
         return await runPowerShell(script);
@@ -399,11 +423,11 @@ EOF
     // --- LINUX (UFW / IPTables) ---
     const linuxBlock = `
       if which ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
-        sudo ufw insert 1 deny from ${ip} to any >/dev/null 2>&1
-        echo "IP ${ip} berhasil diblokir di UFW Linux."
+        sudo ufw insert 1 deny from ${cleanIp} to any >/dev/null 2>&1
+        echo "IP ${cleanIp} berhasil diblokir di UFW Linux."
       else
-        sudo iptables -I INPUT -s ${ip} -j DROP
-        echo "IP ${ip} berhasil diblokir di IPTables Linux."
+        sudo iptables -I INPUT -s ${cleanIp} -j DROP
+        echo "IP ${cleanIp} berhasil diblokir di IPTables Linux."
       fi
     `;
     try {

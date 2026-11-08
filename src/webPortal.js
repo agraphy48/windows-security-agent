@@ -3,11 +3,86 @@ const contactsManager = require('./contacts');
 const config = require('./config');
 const cluster = require('./cluster');
 
+function safeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+class RateLimiter {
+  constructor(windowMs, maxRequests) {
+    this.windowMs = windowMs;
+    this.maxRequests = maxRequests;
+    this.hits = new Map();
+    setInterval(() => this.cleanup(), 5 * 60 * 1000).unref();
+  }
+
+  isLimited(key) {
+    const now = Date.now();
+    const timestamps = (this.hits.get(key) || []).filter(t => now - t < this.windowMs);
+    if (timestamps.length >= this.maxRequests) {
+      this.hits.set(key, timestamps);
+      return true;
+    }
+    timestamps.push(now);
+    this.hits.set(key, timestamps);
+    return false;
+  }
+
+  getResetTime(key) {
+    const now = Date.now();
+    const timestamps = (this.hits.get(key) || []).filter(t => now - t < this.windowMs);
+    if (timestamps.length === 0) return 0;
+    return Math.ceil((timestamps[0] + this.windowMs - now) / 1000);
+  }
+
+  cleanup() {
+    const now = Date.now();
+    for (const [key, timestamps] of this.hits.entries()) {
+      const valid = timestamps.filter(t => now - t < this.windowMs);
+      if (valid.length === 0) {
+        this.hits.delete(key);
+      } else {
+        this.hits.set(key, valid);
+      }
+    }
+  }
+}
+
 class WebPortal {
   constructor() {
     this.sessions = new Map(); // token -> { username, expiresAt }
     this.failedLogins = new Map(); // ip -> { count, lockedUntil }
     this.sessionTimeoutMs = 24 * 60 * 60 * 1000; // 24 jam
+    this.globalLimiter = new RateLimiter(60 * 1000, 150); // Max 150 req/menit per IP
+    this.testWaLimiter = new RateLimiter(60 * 1000, 5); // Max 5 tes WA/menit
+    this.botPairLimiter = new RateLimiter(5 * 60 * 1000, 5); // Max 5 pairing req/5 menit
+    this.contactsWriteLimiter = new RateLimiter(60 * 1000, 30); // Max 30 modifikasi kontak/menit
+  }
+
+  setSecurityHeaders(req, res) {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com;");
+
+    const proto = req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : '');
+    if (proto === 'https' || req.headers['cf-visitor']?.includes('https')) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
   }
 
   parseCookies(req) {
@@ -41,15 +116,47 @@ class WebPortal {
   }
 
   getClientIp(req) {
-    return (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown')
-      .replace(/^.*:/, '');
+    // 1. Cloudflare IP (jika di balik Cloudflare Proxy)
+    const cfIp = req.headers['cf-connecting-ip'];
+    if (cfIp && typeof cfIp === 'string') return cfIp.trim();
+
+    // 2. Standard Reverse Proxy X-Real-IP
+    const realIp = req.headers['x-real-ip'];
+    if (realIp && typeof realIp === 'string') return realIp.trim();
+
+    // 3. X-Forwarded-For (ambil IP pertama klien)
+    const xff = req.headers['x-forwarded-for'];
+    if (xff && typeof xff === 'string') {
+      const parts = xff.split(',');
+      if (parts.length > 0) return parts[0].trim().replace(/^.*:/, '');
+    }
+
+    // 4. Fallback ke Socket Remote Address
+    const remote = req.socket?.remoteAddress || 'unknown';
+    return String(remote).replace(/^.*:/, '');
   }
 
-  async readBody(req) {
-    return new Promise((resolve) => {
+  async readBody(req, maxSize = 1048576) {
+    return new Promise((resolve, reject) => {
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      let receivedBytes = 0;
+      let aborted = false;
+
+      req.on('data', chunk => {
+        if (aborted) return;
+        receivedBytes += chunk.length;
+        if (receivedBytes > maxSize) {
+          aborted = true;
+          req.destroy();
+          const err = new Error('Payload melebihi batas ukuran maksimal (1MB).');
+          err.statusCode = 413;
+          return reject(err);
+        }
+        body += chunk;
+      });
+
       req.on('end', () => {
+        if (aborted) return;
         if (!body) return resolve({});
         const contentType = req.headers['content-type'] || '';
         if (contentType.includes('application/json')) {
@@ -73,10 +180,31 @@ class WebPortal {
           }
         }
       });
+
+      req.on('error', err => {
+        if (!aborted) reject(err);
+      });
     });
   }
 
   async handleRequest(req, res, waClient) {
+    // 0. Terapkan HTTP Security Headers & Proteksi Global Rate Limiting
+    this.setSecurityHeaders(req, res);
+
+    const clientIp = this.getClientIp(req);
+    if (this.globalLimiter.isLimited(clientIp)) {
+      const waitSec = this.globalLimiter.getResetTime(clientIp);
+      res.writeHead(429, { 
+        'Content-Type': 'application/json',
+        'Retry-After': String(waitSec || 30)
+      });
+      res.end(JSON.stringify({ 
+        success: false, 
+        error: `Terlalu banyak permintaan (Rate limit exceeded). Coba lagi dalam ${waitSec || 30} detik.` 
+      }));
+      return true;
+    }
+
     const url = req.url.split('?')[0];
     const method = req.method.toUpperCase();
 
@@ -174,11 +302,23 @@ class WebPortal {
       }
 
       if (url === '/api/contacts' && method === 'POST') {
+        const rateKey = session?.username || clientIp;
+        if (this.contactsWriteLimiter.isLimited(rateKey)) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Terlalu banyak permintaan simpan kontak. Tunggu sebentar.' }));
+          return true;
+        }
         await this.handleApiAddContact(req, res);
         return true;
       }
 
       if (url.startsWith('/api/contacts/') && method === 'DELETE') {
+        const rateKey = session?.username || clientIp;
+        if (this.contactsWriteLimiter.isLimited(rateKey)) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Terlalu banyak permintaan hapus kontak.' }));
+          return true;
+        }
         const id = url.replace('/api/contacts/', '');
         const removed = contactsManager.removeContact(id);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -187,6 +327,12 @@ class WebPortal {
       }
 
       if (url.startsWith('/api/contacts/') && url.endsWith('/toggle') && method === 'POST') {
+        const rateKey = session?.username || clientIp;
+        if (this.contactsWriteLimiter.isLimited(rateKey)) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Terlalu banyak permintaan ubah status kontak.' }));
+          return true;
+        }
         const id = url.replace('/api/contacts/', '').replace('/toggle', '');
         const contact = contactsManager.toggleContact(id);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -195,6 +341,13 @@ class WebPortal {
       }
 
       if (url.startsWith('/api/contacts/') && url.endsWith('/test') && method === 'POST') {
+        const rateKey = session?.username || clientIp;
+        if (this.testWaLimiter.isLimited(rateKey)) {
+          const waitSec = this.testWaLimiter.getResetTime(rateKey);
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: `Batas pengiriman uji coba tercapai. Tunggu ${waitSec} detik.` }));
+          return true;
+        }
         const id = url.replace('/api/contacts/', '').replace('/test', '');
         await this.handleApiTestContact(req, res, id, waClient);
         return true;
@@ -208,7 +361,22 @@ class WebPortal {
       }
 
       if (url === '/api/bot/pair' && method === 'POST') {
-        const body = await this.readBody(req);
+        if (this.botPairLimiter.isLimited(clientIp)) {
+          const waitSec = this.botPairLimiter.getResetTime(clientIp);
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: `Terlalu banyak permintaan kode pairing. Tunggu ${waitSec} detik.` }));
+          return true;
+        }
+        let body = {};
+        try {
+          body = await this.readBody(req);
+        } catch (err) {
+          if (err.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Ukuran payload melebihi batas maksimal (1MB).' }));
+            return true;
+          }
+        }
         try {
           const result = await waClient.requestPairingCode(body.phoneNumber);
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -221,6 +389,11 @@ class WebPortal {
       }
 
       if (url === '/api/bot/logout' && method === 'POST') {
+        if (this.botPairLimiter.isLimited(clientIp)) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Terlalu banyak permintaan logout bot.' }));
+          return true;
+        }
         try {
           const result = await waClient.logoutBot();
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -251,25 +424,38 @@ class WebPortal {
     const ip = this.getClientIp(req);
     const now = Date.now();
 
-    // Cek proteksi brute force
+    // Cek proteksi brute force login
     const failInfo = this.failedLogins.get(ip);
     if (failInfo && failInfo.lockedUntil > now) {
       const waitSec = Math.ceil((failInfo.lockedUntil - now) / 1000);
-      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(waitSec) });
       return res.end(JSON.stringify({
         success: false,
-        error: `Terlalu banyak percobaan gagal. Akses dikunci sementara selama ${waitSec} detik.`
+        error: `Terlalu banyak percobaan login gagal. Akses IP Anda dikunci sementara selama ${waitSec} detik.`
       }));
     }
 
-    const body = await this.readBody(req);
-    const username = (body.username || '').trim();
-    const password = (body.password || '').trim();
+    let body = {};
+    try {
+      body = await this.readBody(req);
+    } catch (err) {
+      if (err.statusCode === 413) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: false, error: 'Ukuran payload login melebihi batas maksimal (1MB).' }));
+      }
+    }
 
-    const expectedUser = config.dashboardUser || 'admin';
+    const username = String(body.username || '').trim();
+    const password = String(body.password || '').trim();
+
+    const expectedUser = String(config.dashboardUser || 'admin');
     const expectedPass = String(config.dashboardPass || config.securityPin || '465157');
+    const expectedPin = String(config.securityPin || '465157');
 
-    if (username === expectedUser && (password === expectedPass || password === String(config.securityPin))) {
+    const userValid = safeCompare(username, expectedUser);
+    const passValid = safeCompare(password, expectedPass) || safeCompare(password, expectedPin);
+
+    if (userValid && passValid) {
       // Login sukses
       this.failedLogins.delete(ip);
       const token = crypto.randomBytes(32).toString('hex');
@@ -279,9 +465,12 @@ class WebPortal {
         expiresAt: now + this.sessionTimeoutMs
       });
 
+      const isHttps = (req.headers['x-forwarded-proto'] === 'https') || (req.headers['cf-visitor']?.includes('https')) || !!req.socket?.encrypted;
+      const cookieFlags = `Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${isHttps ? '; Secure' : ''}`;
+
       res.writeHead(200, {
         'Content-Type': 'application/json',
-        'Set-Cookie': `secops_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`
+        'Set-Cookie': `secops_session=${token}; ${cookieFlags}`
       });
       return res.end(JSON.stringify({ success: true, message: 'Login berhasil!' }));
     } else {
@@ -289,14 +478,15 @@ class WebPortal {
       const currentFails = (failInfo ? failInfo.count : 0) + 1;
       let lockedUntil = 0;
       if (currentFails >= 5) {
-        lockedUntil = now + (5 * 60 * 1000); // Kunci 5 menit
+        lockedUntil = now + (10 * 60 * 1000); // Kunci 10 menit
+        console.warn(`[🚨 BRUTE-FORCE LOGIN] IP ${ip} gagal 5x login ke Web Portal. IP dikunci 10 menit.`);
       }
       this.failedLogins.set(ip, { count: currentFails, lockedUntil });
 
       res.writeHead(401, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         success: false,
-        error: 'Username atau Password/PIN salah!' + (currentFails >= 5 ? ' IP Anda dikunci selama 5 menit.' : ` (${currentFails}/5 percobaan)`)
+        error: 'Username atau Password/PIN salah!' + (currentFails >= 5 ? ' IP Anda dikunci selama 10 menit.' : ` (${currentFails}/5 percobaan)`)
       }));
     }
   }
@@ -306,15 +496,24 @@ class WebPortal {
     if (cookies.secops_session) {
       this.sessions.delete(cookies.secops_session);
     }
+    const isHttps = (req.headers['x-forwarded-proto'] === 'https') || (req.headers['cf-visitor']?.includes('https')) || !!req.socket?.encrypted;
     res.writeHead(200, {
       'Content-Type': 'application/json',
-      'Set-Cookie': 'secops_session=; Path=/; HttpOnly; Max-Age=0'
+      'Set-Cookie': `secops_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${isHttps ? '; Secure' : ''}`
     });
     return res.end(JSON.stringify({ success: true }));
   }
 
   async handleApiAddContact(req, res) {
-    const body = await this.readBody(req);
+    let body = {};
+    try {
+      body = await this.readBody(req);
+    } catch (err) {
+      if (err.statusCode === 413) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: false, error: 'Ukuran payload melebihi batas (1MB).' }));
+      }
+    }
     try {
       const result = contactsManager.addContact({
         number: body.number,
@@ -629,7 +828,7 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         </div>
       </div>
       <div class="header-actions">
-        <span class="user-tag">👤 Admin: <b>${session.username}</b></span>
+        <span class="user-tag">👤 Admin: <b>${escapeHtml(session.username)}</b></span>
         <button onclick="handleLogout()" class="btn-logout">🚪 Keluar</button>
       </div>
     </header>
@@ -867,6 +1066,16 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
   <div id="toast"></div>
 
   <script>
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
     function showToast(msg, isError = false) {
       const toast = document.getElementById('toast');
       toast.innerText = msg;
@@ -901,12 +1110,12 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
               return \`
                 <div class="fleet-item">
                   <div>
-                    <b>\${node.name}</b> (\${node.nodeId})<br>
-                    <span style="color:#64748b;font-size:11px;">Role: \${node.role.toUpperCase()}</span>
+                    <b>\${escapeHtml(node.name)}</b> (\${escapeHtml(node.nodeId)})<br>
+                    <span style="color:#64748b;font-size:11px;">Role: \${escapeHtml(node.role).toUpperCase()}</span>
                   </div>
                   <div class="fleet-status">
                     <span class="\${isOnline ? 'dot-online' : 'dot-offline'}"></span>
-                    <span style="color:\${isOnline ? '#34d399' : '#f87171'};font-weight:600;">\${node.status.toUpperCase()}</span>
+                    <span style="color:\${isOnline ? '#34d399' : '#f87171'};font-weight:600;">\${isOnline ? 'ONLINE' : 'OFFLINE'}</span>
                   </div>
                 </div>
               \`;
@@ -943,7 +1152,7 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
               if (a === 'attack') return '<span class="badge badge-attack">🚨 Serangan</span>';
               if (a === 'server_down') return '<span class="badge badge-down">⚠️ Node Down</span>';
               if (a === 'service_discovery') return '<span class="badge badge-service">📦 Service Baru</span>';
-              return \`<span class="badge">\${a}</span>\`;
+              return \`<span class="badge">\${escapeHtml(a)}</span>\`;
             }).join(' ');
           }
 
@@ -957,20 +1166,20 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
             <tr>
               <td>\${i + 1}</td>
               <td>
-                <b>\${c.name}</b><br>
-                <span style="color:var(--text-muted);font-size:11px;">\${c.role}</span>
+                <b>\${escapeHtml(c.name)}</b><br>
+                <span style="color:var(--text-muted);font-size:11px;">\${escapeHtml(c.role)}</span>
               </td>
               <td>
-                <a href="https://wa.me/\${c.number}" target="_blank" style="color:#60a5fa;text-decoration:none;font-weight:600;">
-                  📱 +\${c.number}
+                <a href="https://wa.me/\${encodeURIComponent(c.number)}" target="_blank" style="color:#60a5fa;text-decoration:none;font-weight:600;">
+                  📱 +\${escapeHtml(c.number)}
                 </a>
               </td>
               <td>\${alertBadges}</td>
               <td>\${statusBadge}</td>
               <td>
-                <button onclick="testContact('\${c.id}')" class="btn-action btn-test" title="Kirim Pesan Uji Coba WA">🧪 Tes WA</button>
-                <button onclick="toggleContact('\${c.id}')" class="btn-action btn-toggle" title="Aktifkan/Nonaktifkan">\${toggleLabel}</button>
-                <button onclick="deleteContact('\${c.id}', '\${c.name}')" class="btn-action btn-delete" title="Hapus Kontak">🗑️</button>
+                <button onclick="testContact('\${escapeHtml(c.id)}')" class="btn-action btn-test" title="Kirim Pesan Uji Coba WA">🧪 Tes WA</button>
+                <button onclick="toggleContact('\${escapeHtml(c.id)}')" class="btn-action btn-toggle" title="Aktifkan/Nonaktifkan">\${toggleLabel}</button>
+                <button onclick="deleteContact('\${escapeHtml(c.id)}', '\${escapeHtml(c.name).replace(/'/g, "\\\\'")}')" class="btn-action btn-delete" title="Hapus Kontak">🗑️</button>
               </td>
             </tr>
           \`;

@@ -1,7 +1,15 @@
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const security = require('./security');
 const config = require('./config');
+
+function safeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
 
 class ClusterManager {
   constructor() {
@@ -14,6 +22,19 @@ class ClusterManager {
     this.onFailoverAlert = null;
     this.onClusterAlert = null;
     this.onNodeStatusChange = null;
+    this.rateLimits = new Map(); // ip -> [timestamps]
+  }
+
+  checkRateLimit(ip, limit = 300, windowMs = 60000) {
+    const now = Date.now();
+    const timestamps = (this.rateLimits.get(ip) || []).filter(t => now - t < windowMs);
+    if (timestamps.length >= limit) {
+      this.rateLimits.set(ip, timestamps);
+      return true;
+    }
+    timestamps.push(now);
+    this.rateLimits.set(ip, timestamps);
+    return false;
   }
 
   init(httpServer) {
@@ -72,11 +93,18 @@ class ClusterManager {
     const clientIp = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'unknown';
     const authHeader = req.headers['x-cluster-secret'];
 
+    // 1. Rate Limiting Protection untuk Cluster API (Max 300 req / menit per IP)
+    if (this.checkRateLimit(clientIp, 300, 60000)) {
+      console.warn(`[⚠️ Cluster Rate Limit] Terlalu banyak permintaan dari IP: ${clientIp}`);
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Terlalu banyak permintaan cluster. Akses dibatasi.' }));
+    }
+
     console.log(`[🌐 Cluster API] ${req.method} ${url} dari IP: ${clientIp}`);
 
-    // Verifikasi Token Rahasia Cluster
-    if (authHeader !== config.clusterSecret) {
-      console.warn(`[⚠️ Cluster Auth Ditolak] Token salah dari IP ${clientIp}. Header: "${authHeader}" (Dibutuhkan: "${config.clusterSecret}")`);
+    // 2. Verifikasi Token Rahasia Cluster dengan Constant-Time Safe Comparison (Mencegah Timing Attack)
+    if (!authHeader || !safeCompare(String(authHeader), String(config.clusterSecret))) {
+      console.warn(`[⚠️ Cluster Auth Ditolak] Token tidak sah atau tidak ada dari IP ${clientIp}.`);
       res.writeHead(403, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'Akses cluster ditolak: Token tidak valid' }));
     }
@@ -103,8 +131,24 @@ class ClusterManager {
 
     if (req.method === 'POST') {
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      let receivedBytes = 0;
+      let aborted = false;
+      const MAX_BODY = 1048576; // 1MB Max Buffer Protection
+
+      req.on('data', chunk => {
+        if (aborted) return;
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_BODY) {
+          aborted = true;
+          req.destroy();
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Ukuran payload data melebihi batas (1MB).' }));
+        }
+        body += chunk;
+      });
+
       req.on('end', async () => {
+        if (aborted) return;
         let data = {};
         try { data = JSON.parse(body); } catch {}
 
@@ -236,13 +280,28 @@ class ClusterManager {
       if (command === 'scan-full') return await security.startFullScan();
       if (command === 'ports') return await security.getListeningPorts();
       if (command === 'docker') return await security.getDockerStatus();
-      if (command === 'docker-restart') return await security.restartDockerContainer(params.container);
-      if (command === 'block-ip') return await security.blockIp(params.ip);
+      if (command === 'docker-restart') {
+        const container = String(params.container || '').trim();
+        if (!/^[a-zA-Z0-9_\-]+$/.test(container)) return { error: 'Nama container tidak valid' };
+        return await security.restartDockerContainer(container);
+      }
+      if (command === 'block-ip') {
+        const ip = String(params.ip || '').trim();
+        return await security.blockIp(ip);
+      }
       if (command === 'lockdown') return await security.emergencyLockdown();
       if (command === 'restore') return await security.restoreCloudflare();
       if (command === 'services') return await security.getDiscoveredServices();
-      if (command === 'service-detail') return await security.getServiceDetail(params.name);
-      if (command === 'service-restart') return await security.restartService(params.name);
+      if (command === 'service-detail') {
+        const name = String(params.name || '').trim();
+        if (!/^[a-zA-Z0-9_\-@\.]+$/.test(name)) return { error: 'Nama service tidak valid' };
+        return await security.getServiceDetail(name);
+      }
+      if (command === 'service-restart') {
+        const name = String(params.name || '').trim();
+        if (!/^[a-zA-Z0-9_\-@\.]+$/.test(name)) return { error: 'Nama service tidak valid' };
+        return await security.restartService(name);
+      }
       return { error: `Perintah tidak dikenal: ${command}` };
     } catch (err) {
       return { error: err.message };

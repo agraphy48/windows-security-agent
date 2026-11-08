@@ -122,16 +122,33 @@ class ContactsManager {
 
   addContact({ number, name, role = 'SysAdmin', alerts = ['all'] }) {
     const clean = this.formatNumber(number);
-    if (!clean || clean.length < 8) {
-      throw new Error('Nomor WhatsApp tidak valid. Masukkan nomor minimal 8-15 digit angka (contoh: 628123456789 atau 08123456789).');
+    if (!clean || clean.length < 8 || clean.length > 20) {
+      throw new Error('Nomor WhatsApp tidak valid. Masukkan nomor 8-20 digit angka (contoh: 628123456789 atau 08123456789).');
     }
+
+    // Sanitasi input teks untuk mencegah injeksi XSS / karakter berbahaya
+    const safeName = String(name || `Kontak ${clean.slice(-4)}`)
+      .replace(/[<>'"&]/g, '')
+      .trim()
+      .substring(0, 80);
+
+    const safeRole = String(role || 'SysAdmin')
+      .replace(/[<>'"&]/g, '')
+      .trim()
+      .substring(0, 50);
+
+    const allowedAlerts = ['all', 'attack', 'server_down', 'service_discovery'];
+    const safeAlerts = Array.isArray(alerts) && alerts.length > 0
+      ? alerts.filter(a => allowedAlerts.includes(a))
+      : ['all'];
+    if (safeAlerts.length === 0) safeAlerts.push('all');
 
     const existingIndex = this.contacts.findIndex(c => c.number === clean);
     if (existingIndex >= 0) {
       // Update kontak yang sudah ada
-      this.contacts[existingIndex].name = name || this.contacts[existingIndex].name;
-      this.contacts[existingIndex].role = role || this.contacts[existingIndex].role;
-      this.contacts[existingIndex].alerts = Array.isArray(alerts) && alerts.length > 0 ? alerts : ['all'];
+      this.contacts[existingIndex].name = safeName || this.contacts[existingIndex].name;
+      this.contacts[existingIndex].role = safeRole || this.contacts[existingIndex].role;
+      this.contacts[existingIndex].alerts = safeAlerts;
       this.contacts[existingIndex].active = true;
       this.contacts[existingIndex].updatedAt = new Date().toISOString();
       this.save();
@@ -141,9 +158,9 @@ class ContactsManager {
     const newContact = {
       id: 'cnt-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
       number: clean,
-      name: name || `Kontak ${clean.slice(-4)}`,
-      role: role || 'Petugas Siaga',
-      alerts: Array.isArray(alerts) && alerts.length > 0 ? alerts : ['all'],
+      name: safeName,
+      role: safeRole,
+      alerts: safeAlerts,
       active: true,
       createdAt: new Date().toISOString(),
       lastAlertSent: null

@@ -5,11 +5,19 @@ const QRCode = require('qrcode');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const config = require('./config');
 const security = require('./security');
 const cluster = require('./cluster');
 const webPortal = require('./webPortal');
 const contactsManager = require('./contacts');
+
+function safeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
 
 class WhatsAppClient {
   constructor() {
@@ -22,6 +30,7 @@ class WhatsAppClient {
     this.adminSessions = new Map(); // cleanSender -> lastAuthTimestamp
     this.intruderAlerts = new Map(); // cleanSender -> lastAlertTimestamp
     this.userMenuState = new Map(); // cleanSender -> { step: 'CHOOSE_SERVER' | 'SERVER_ACTIONS', targetNodeId, targetNodeName, serverList }
+    this.failedPinAttempts = new Map(); // cleanSender -> { count, lockedUntil } (Brute-Force Lockout)
     this.lastPairingCode = null;
     this.pairingExpiresAt = 0;
     this.pairingPhone = null;
@@ -272,6 +281,22 @@ class WhatsAppClient {
     // Verifikasi Otorisasi Admin
     const cleanSender = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
+    // 0. Cek Proteksi Brute-Force PIN Lockout (Mencegah serangan tebak PIN / Dictionary Attack)
+    const pinLock = this.failedPinAttempts.get(cleanSender);
+    const now = Date.now();
+    if (pinLock && pinLock.lockedUntil > now) {
+      const waitSec = Math.ceil((pinLock.lockedUntil - now) / 1000);
+      const waitMin = Math.ceil(waitSec / 60);
+      console.warn(`[🚨 Lockout Active] Pesan dari ${cleanSender} ditolak karena terkunci brute-force (${waitSec}s remaining).`);
+      return await this.reply(
+        senderJid,
+        `⏳ *AKSES DIBEKUKAN SEMENTARA (BRUTE-FORCE DETECTED)*\n` +
+        `Terlalu banyak percobaan PIN salah (${pinLock.count} kali berturut-turut).\n` +
+        `Nomor Anda dibekukan sementara selama ${waitMin} menit (${waitSec} detik lagi).\n` +
+        `Insiden ini dicatat dalam sistem log keamanan.`
+      );
+    }
+
     // Jika admin list masih kosong, jadikan pengirim pertama sebagai admin otomatis
     if (config.adminNumbers.length === 0) {
       config.addAdmin(cleanSender);
@@ -303,7 +328,8 @@ class WhatsAppClient {
         if (pinMatch) inlinePin = pinMatch[1];
       }
 
-      if (inlinePin === config.securityPin) {
+      if (safeCompare(inlinePin, String(config.securityPin))) {
+        this.failedPinAttempts.delete(cleanSender);
         // Tautkan LID ini ke admin utama
         contactsManager.attachLidToContact('6285378587299', cleanSender);
         config.addAdmin(cleanSender);
@@ -313,7 +339,6 @@ class WhatsAppClient {
 
         // Intruder Alert ke WhatsApp Admin Utama
         if (config.intruderAlert && config.adminNumbers.length > 0) {
-          const now = Date.now();
           const lastAlert = this.intruderAlerts.get(cleanSender) || 0;
           // Batasi notifikasi max 1 kali per 3 menit per nomor asing agar tidak spam
           if (now - lastAlert > 3 * 60 * 1000) {
@@ -380,7 +405,8 @@ Contoh: langsung kirim \`${config.securityPin}\` atau \`monitor ${config.securit
         rawPinInput = rawPinInput.replace(/^pin[:\s]+/i, '').trim();
       }
 
-      if (rawPinInput === config.securityPin) {
+      if (safeCompare(rawPinInput, String(config.securityPin))) {
+        this.failedPinAttempts.delete(cleanSender);
         this.adminSessions.set(cleanSender, Date.now());
         const pendingCmd = this.pendingCommands.get(cleanSender);
         this.pendingCommands.delete(cleanSender);
@@ -398,6 +424,7 @@ Contoh: langsung kirim \`${config.securityPin}\` atau \`monitor ${config.securit
       // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157", "monitor + 465157", "monitor+465157", "1 465157")
       const pinPattern = new RegExp(`[\\s+:,-]+${config.securityPin}$`);
       if (pinPattern.test(rawTrimmed)) {
+        this.failedPinAttempts.delete(cleanSender);
         this.adminSessions.set(cleanSender, Date.now());
         const cmdWithoutPin = rawTrimmed.replace(pinPattern, '').trim();
         console.log(`[🔑 Auth Inline] Nomor ${cleanSender} mengotorisasi perintah: "${cmdWithoutPin}"`);
@@ -408,7 +435,41 @@ Contoh: langsung kirim \`${config.securityPin}\` atau \`monitor ${config.securit
       if (!isSessionValid) {
         // Jika tampaknya mencoba menebak PIN angka
         if (/^\d{4,8}$/.test(rawPinInput) || /^pin[:\s]+/i.test(rawTrimmed)) {
-          return await this.reply(senderJid, '❌ *PIN KEAMANAN SALAH!* Akses bot tetap terkunci.');
+          const currentFails = ((pinLock ? pinLock.count : 0) + 1);
+          if (currentFails >= 5) {
+            const lockedUntil = now + (15 * 60 * 1000); // 15 menit lockout
+            this.failedPinAttempts.set(cleanSender, { count: currentFails, lockedUntil });
+            console.warn(`[🚨 BRUTE-FORCE DETECTED] Nomor ${cleanSender} telah gagal 5x memasukkan PIN. Dibekukan 15 menit.`);
+
+            const alertMsg = 
+`🚨 *PERINGATAN BRUTE-FORCE SECURITY PIN* 🚨
+-----------------------------------------
+Terdeteksi percobaan pembobolan PIN bot WhatsApp server!
+• *Nomor Pengirim:* +${cleanSender}
+• *Jumlah Kegagalan:* 5 kali berturut-turut
+• *Waktu:* ${new Date().toLocaleString('id-ID')}
+• *Tindakan Otomatis:* 🛡️ Nomor dibekukan dari sistem selama 15 menit.
+-----------------------------------------`;
+
+            for (const adminNum of config.adminNumbers) {
+              if (adminNum !== cleanSender) {
+                try {
+                  await this.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
+                } catch (e) {}
+              }
+            }
+
+            return await this.reply(
+              senderJid,
+              `🚨 *AKSES DIBLOKIR SEMENTARA!* 🚨\nAnda telah 5 kali salah memasukkan PIN keamanan.\nNomor Anda dibekukan selama 15 menit dan peringatan keamanan telah dikirimkan ke Admin Server.`
+            );
+          } else {
+            this.failedPinAttempts.set(cleanSender, { count: currentFails, lockedUntil: 0 });
+            return await this.reply(
+              senderJid,
+              `❌ *PIN KEAMANAN SALAH!* (${currentFails}/5 percobaan)\nAkses bot tetap terkunci. Setelah 5 kegagalan, nomor Anda akan dibekukan selama 15 menit.`
+            );
+          }
         }
 
         // Simpan perintah yang ingin dijalankan agar otomatis dieksekusi setelah PIN dimasukkan
@@ -452,7 +513,8 @@ Atau sertakan di akhir perintah: \`monitor ${config.securityPin}\`
           inputPin = inputPin.substring(4).trim();
         }
 
-        if (inputPin === config.securityPin) {
+        if (safeCompare(inputPin, String(config.securityPin))) {
+          this.failedPinAttempts.delete(cleanSender);
           const { action, target, targetNodeId } = pending;
           this.pendingActions.delete(cleanSender);
           await this.reply(senderJid, '🔑 PIN terverifikasi. Mengeksekusi tindakan...');
