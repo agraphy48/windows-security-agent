@@ -290,16 +290,35 @@ class WhatsAppClient {
     }
 
     if (!config.isAdmin(senderJid)) {
-      console.log(`[⚠️ Akses Ditolak] Pesan dari nomor tidak dikenal: ${cleanSender}`);
+      // Zero-Trust Auto-Binding: Jika pengguna memasukkan PIN keamanan yang valid,
+      // kita tahu 100% ini adalah administrator resmi yang sedang chatting melalui WhatsApp LID!
+      let inlinePin = '';
+      const rawTrimmed = text.trim();
+      if (/^\d{4,8}$/.test(rawTrimmed)) {
+        inlinePin = rawTrimmed;
+      } else if (/^pin[:\s]+(\d{4,8})/i.test(rawTrimmed)) {
+        inlinePin = rawTrimmed.replace(/^pin[:\s]+/i, '').trim();
+      } else {
+        const pinMatch = rawTrimmed.match(/[\s+:,-]+(\d{4,8})$/);
+        if (pinMatch) inlinePin = pinMatch[1];
+      }
 
-      // Intruder Alert ke WhatsApp Admin Utama
-      if (config.intruderAlert && config.adminNumbers.length > 0) {
-        const now = Date.now();
-        const lastAlert = this.intruderAlerts.get(cleanSender) || 0;
-        // Batasi notifikasi max 1 kali per 3 menit per nomor asing agar tidak spam
-        if (now - lastAlert > 3 * 60 * 1000) {
-          this.intruderAlerts.set(cleanSender, now);
-          const alertMsg = 
+      if (inlinePin === config.securityPin) {
+        // Tautkan LID ini ke admin utama
+        contactsManager.attachLidToContact('6285378587299', cleanSender);
+        config.addAdmin(cleanSender);
+        console.log(`[🔑 Zero-Trust Auth] Nomor/LID ${cleanSender} berhasil diverifikasi dengan Master PIN & ditautkan sebagai Admin!`);
+      } else {
+        console.log(`[⚠️ Akses Ditolak] Pesan dari nomor tidak dikenal: ${cleanSender}`);
+
+        // Intruder Alert ke WhatsApp Admin Utama
+        if (config.intruderAlert && config.adminNumbers.length > 0) {
+          const now = Date.now();
+          const lastAlert = this.intruderAlerts.get(cleanSender) || 0;
+          // Batasi notifikasi max 1 kali per 3 menit per nomor asing agar tidak spam
+          if (now - lastAlert > 3 * 60 * 1000) {
+            this.intruderAlerts.set(cleanSender, now);
+            const alertMsg = 
 `🚨 *PERINGATAN PENYUSUP (AKSES DITOLAK)* 🚨
 -----------------------------------------
 Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
@@ -309,16 +328,17 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
 • *Status:* 🛡️ Akses diblokir otomatis. Pesan tidak dibalas.
 -----------------------------------------`;
 
-          for (const adminNum of config.adminNumbers) {
-            try {
-              await this.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
-            } catch (err) {
-              console.error('Gagal kirim alert penyusup:', err.message);
+            for (const adminNum of config.adminNumbers) {
+              try {
+                await this.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
+              } catch (err) {
+                console.error('Gagal kirim alert penyusup:', err.message);
+              }
             }
           }
         }
+        return; // Abaikan diam-diam untuk keamanan
       }
-      return; // Abaikan diam-diam untuk keamanan
     }
 
     // 1. Cek perintah KUNCI manual
@@ -335,11 +355,29 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
     if (config.requirePinAll) {
       const lastAuth = this.adminSessions.get(cleanSender);
       const isSessionValid = lastAuth && (config.pinTimeoutMinutes > 0) && (Date.now() - lastAuth < config.pinTimeoutMinutes * 60 * 1000);
+      const rawTrimmed = text.trim();
 
-      // Cek apakah pesan adalah input PIN murni (misal: "465157" atau "PIN 465157")
-      let rawPinInput = text.trim();
-      if (rawPinInput.toLowerCase().startsWith('pin ')) {
-        rawPinInput = rawPinInput.substring(4).trim();
+      // Cek apakah user menulis "monitor + pin" atau "monitor pin" (secara harfiah kata "pin"):
+      if (/^(monitor|menu|status|help)\s*(\+)?\s*pin$/i.test(rawTrimmed)) {
+        if (isSessionValid) {
+          return await this.showServerSelectionMenu(senderJid, cleanSender);
+        } else {
+          this.pendingCommands.set(cleanSender, 'monitor');
+          return await this.reply(
+            senderJid,
+`🔒 *BOT KEAMANAN TERKUNCI* 🔒
+-----------------------------------------
+Silakan masukkan angka PIN keamanan Anda (${config.securityPin.length} digit):
+Contoh: langsung kirim \`${config.securityPin}\` atau \`monitor ${config.securityPin}\`
+-----------------------------------------`
+          );
+        }
+      }
+
+      // Cek apakah pesan adalah input PIN murni (misal: "465157" atau "PIN 465157" atau "pin: 465157")
+      let rawPinInput = rawTrimmed;
+      if (/^pin[:\s]+/i.test(rawPinInput)) {
+        rawPinInput = rawPinInput.replace(/^pin[:\s]+/i, '').trim();
       }
 
       if (rawPinInput === config.securityPin) {
@@ -357,25 +395,24 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
         }
       }
 
-      // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157" atau "1 465157")
-      const words = text.trim().split(/\s+/);
-      if (words.length > 1 && words[words.length - 1] === config.securityPin) {
+      // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157", "monitor + 465157", "monitor+465157", "1 465157")
+      const pinPattern = new RegExp(`[\\s+:,-]+${config.securityPin}$`);
+      if (pinPattern.test(rawTrimmed)) {
         this.adminSessions.set(cleanSender, Date.now());
-        words.pop(); // buang PIN
-        const cmdWithoutPin = words.join(' ');
+        const cmdWithoutPin = rawTrimmed.replace(pinPattern, '').trim();
         console.log(`[🔑 Auth Inline] Nomor ${cleanSender} mengotorisasi perintah: "${cmdWithoutPin}"`);
-        return await this.processCommand(senderJid, cmdWithoutPin);
+        return await this.processCommand(senderJid, cmdWithoutPin || 'monitor');
       }
 
       // Jika sesi belum dibuka dan input bukan PIN yang benar
       if (!isSessionValid) {
         // Jika tampaknya mencoba menebak PIN angka
-        if (/^\d{4,8}$/.test(rawPinInput) || text.toLowerCase().startsWith('pin ')) {
+        if (/^\d{4,8}$/.test(rawPinInput) || /^pin[:\s]+/i.test(rawTrimmed)) {
           return await this.reply(senderJid, '❌ *PIN KEAMANAN SALAH!* Akses bot tetap terkunci.');
         }
 
         // Simpan perintah yang ingin dijalankan agar otomatis dieksekusi setelah PIN dimasukkan
-        this.pendingCommands.set(cleanSender, text.trim());
+        this.pendingCommands.set(cleanSender, rawTrimmed);
         return await this.reply(
           senderJid,
 `🔒 *BOT KEAMANAN TERKUNCI* 🔒
@@ -383,7 +420,8 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
 Semua perintah membutuhkan verifikasi PIN.
 
 Silakan masukkan PIN keamanan Anda:
-Contoh: \`PIN <kode_pin>\` atau langsung kirim angka PIN.
+Contoh: langsung kirim angka PIN (misal: \`${config.securityPin}\`)
+Atau sertakan di akhir perintah: \`monitor ${config.securityPin}\`
 -----------------------------------------`
         );
       }
@@ -1273,8 +1311,8 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
   }
 
   async broadcastToAdmins(message, category = null) {
-    if (!this.sock) {
-      console.warn('[WA Broadcast] Tidak dapat mengirim pesan: WhatsApp sock belum siap.');
+    if (!this.sock || !this.isConnected || !this.sock.user) {
+      console.warn('[WA Broadcast] Tidak dapat mengirim pesan: WhatsApp sock belum terhubung.');
       return;
     }
     if (typeof message !== 'string') {

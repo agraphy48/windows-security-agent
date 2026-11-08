@@ -59,7 +59,7 @@ const config = {
     }
     try {
       const contacts = require('./contacts');
-      return contacts.isEmergencyContact(cleanNumber);
+      return contacts.isEmergencyContact(senderJid);
     } catch {
       return false;
     }

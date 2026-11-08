@@ -33,3 +33,4 @@ if (fs.existsSync(contactsPath)) {
 }
 
 console.log('=== Cleanup complete ===');
+

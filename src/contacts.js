@@ -35,6 +35,21 @@ class ContactsManager {
       let changed = false;
       for (const num of config.adminNumbers) {
         const clean = this.formatNumber(num);
+        // Jika angka berupa ID internal WhatsApp LID (>= 15 digit):
+        // kaitkan sebagai alias LID ke kontak utama agar tidak membuat kontak terpisah di UI
+        if (clean && clean.length >= 15 && this.contacts.length > 0) {
+          const primaryAdmin = this.contacts[0];
+          if (primaryAdmin) {
+            if (!primaryAdmin.lids) primaryAdmin.lids = [];
+            if (!primaryAdmin.lids.includes(clean)) {
+              primaryAdmin.lids.push(clean);
+              primaryAdmin.lid = clean;
+              changed = true;
+            }
+          }
+          continue;
+        }
+
         if (clean && !this.contacts.some(c => c.number === clean)) {
           this.contacts.push({
             id: 'cnt-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
@@ -182,8 +197,33 @@ class ContactsManager {
   }
 
   isEmergencyContact(senderJid) {
-    const clean = this.formatNumber(senderJid);
-    return this.contacts.some(c => c.active !== false && c.number === clean);
+    if (!senderJid) return false;
+    const clean = String(senderJid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    return this.contacts.some(c => 
+      c.active !== false && (
+        c.number === clean ||
+        c.id === senderJid ||
+        (c.lid && c.lid === clean) ||
+        (Array.isArray(c.lids) && c.lids.includes(clean))
+      )
+    );
+  }
+
+  attachLidToContact(numberOrId, lid) {
+    const cleanLid = String(lid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanLid || cleanLid.length < 10) return false;
+    const contact = this.contacts.find(c => c.id === numberOrId || c.number === numberOrId);
+    if (contact) {
+      if (!contact.lids) contact.lids = [];
+      if (!contact.lids.includes(cleanLid)) {
+        contact.lids.push(cleanLid);
+      }
+      contact.lid = cleanLid;
+      this.save();
+      console.log(`[Contacts] Ditautkan WhatsApp LID ${cleanLid} ke kontak ${contact.name} (${contact.number})`);
+      return true;
+    }
+    return false;
   }
 }
 
