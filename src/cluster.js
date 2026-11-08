@@ -239,6 +239,9 @@ class ClusterManager {
       if (command === 'block-ip') return await security.blockIp(params.ip);
       if (command === 'lockdown') return await security.emergencyLockdown();
       if (command === 'restore') return await security.restoreCloudflare();
+      if (command === 'services') return await security.getDiscoveredServices();
+      if (command === 'service-detail') return await security.getServiceDetail(params.name);
+      if (command === 'service-restart') return await security.restartService(params.name);
       return { error: `Perintah tidak dikenal: ${command}` };
     } catch (err) {
       return { error: err.message };

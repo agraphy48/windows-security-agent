@@ -467,6 +467,230 @@ EOF
       fi
     `;
     return await runBash(linuxRestore);
+  },
+
+  /**
+   * Deteksi seluruh layanan & aplikasi aktif (Cross-Platform)
+   */
+  async getDiscoveredServices() {
+    if (isWindows) {
+      const script = `
+        try {
+          $conns = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalPort, OwningProcess
+          $portMap = @{}
+          foreach ($c in $conns) {
+            $pname = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+            if ($pname) {
+              $pname = $pname.ToLower()
+              if (-not $portMap.ContainsKey($pname)) { $portMap[$pname] = @() }
+              $portMap[$pname] += "tcp:$($c.LocalPort)"
+            }
+          }
+
+          $running = Get-Service | Where-Object Status -eq 'Running'
+          $services = @()
+          foreach ($s in $running) {
+            $base = $s.Name.ToLower()
+            $matchedPorts = @()
+            if ($portMap.ContainsKey($base)) {
+              $matchedPorts = $portMap[$base] | Select-Object -Unique
+            }
+            $isApp = ($matchedPorts.Count -gt 0) -or ($s.Name -match "(?i)docker|node|agent|ollama|web|http|sql|db|cloudflared|nginx|apache|tailscale|wireguard|secops")
+            $services += [PSCustomObject]@{
+              id = $s.Name
+              unit = "$($s.Name).service"
+              name = $s.Name
+              displayName = $s.DisplayName
+              status = "active"
+              ports = $matchedPorts
+              category = if ($isApp) { "application" } else { "system" }
+            }
+          }
+          $services | Sort-Object @{Expression={if ($_.category -eq "application") {0} else {1}}}, name | ConvertTo-Json -Depth 3
+        } catch {
+          "[]"
+        }
+      `;
+      try {
+        const res = await runPowerShell(script);
+        const parsed = JSON.parse(res);
+        return Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+      } catch (err) {
+        console.error('[getDiscoveredServices Windows Error]', err.message);
+        return [];
+      }
+    }
+
+    // --- LINUX (systemd & ss) ---
+    try {
+      const rawUnits = await runBash('systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null');
+      const rawPorts = await runBash('ss -tulpn 2>/dev/null');
+
+      const portMap = {};
+      const portLines = (rawPorts || '').split('\n');
+      for (const line of portLines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 5) {
+          const proto = parts[0].toLowerCase();
+          const localAddr = parts[4];
+          const port = localAddr.split(':').pop();
+          if (port && !isNaN(port)) {
+            const userMatch = line.match(/users:\(\("([^"]+)"/);
+            if (userMatch) {
+              const procName = userMatch[1].toLowerCase();
+              if (!portMap[procName]) portMap[procName] = new Set();
+              portMap[procName].add(`${proto}:${port}`);
+            }
+          }
+        }
+      }
+
+      const services = [];
+      const unitLines = (rawUnits || '').split('\n').filter(Boolean);
+      for (const line of unitLines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 4 && parts[0].endsWith('.service')) {
+          const unit = parts[0];
+          const base = unit.replace('.service', '').toLowerCase();
+          const desc = parts.slice(4).join(' ') || base;
+          const status = parts[3] || 'active';
+
+          // Match listening ports
+          const matchedPorts = new Set();
+          for (const [proc, pset] of Object.entries(portMap)) {
+            if (
+              proc === base ||
+              base.includes(proc) ||
+              proc.includes(base) ||
+              (proc === 'litespeed' && base === 'lshttpd') ||
+              (proc === 'mariadbd' && base === 'mariadb') ||
+              (proc === 'pdns_server' && base === 'pdns')
+            ) {
+              for (const p of pset) matchedPorts.add(p);
+            }
+          }
+
+          const isApp =
+            matchedPorts.size > 0 ||
+            /cyberpanel|lscpd|lsws|lshttpd|mariadb|mysql|redis|memcached|tailscale|security-agent|postfix|dovecot|pdns|pure-ftpd|opendkim|docker|nginx|apache|wireguard|wg-quick/.test(base);
+
+          services.push({
+            id: base,
+            unit,
+            name: base,
+            displayName: desc,
+            status,
+            ports: Array.from(matchedPorts),
+            category: isApp ? 'application' : 'system'
+          });
+        }
+      }
+
+      services.sort((a, b) => {
+        if (a.category !== b.category) {
+          return a.category === 'application' ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name);
+      });
+
+      return services;
+    } catch (err) {
+      console.error('[getDiscoveredServices Linux Error]', err.message);
+      return [];
+    }
+  },
+
+  /**
+   * Ambil detail & log laporan layanan tertentu (Cross-Platform)
+   */
+  async getServiceDetail(serviceName) {
+    if (!serviceName || !/^[a-zA-Z0-9_\-@\.]+$/.test(serviceName)) {
+      return { error: 'Nama layanan tidak valid' };
+    }
+
+    if (isWindows) {
+      const script = `
+        try {
+          $s = Get-Service -Name "${serviceName}" -ErrorAction Stop
+          [PSCustomObject]@{
+            name = $s.Name
+            displayName = $s.DisplayName
+            status = $s.Status.ToString()
+            startType = $s.StartType.ToString()
+            canStop = $s.CanStop
+            recentLogs = "Windows Service running normally"
+          } | ConvertTo-Json
+        } catch {
+          [PSCustomObject]@{ error = $_.Exception.Message } | ConvertTo-Json
+        }
+      `;
+      try {
+        const raw = await runPowerShell(script);
+        return JSON.parse(raw);
+      } catch (err) {
+        return { error: err.message };
+      }
+    }
+
+    // --- LINUX ---
+    try {
+      const unit = serviceName.endsWith('.service') ? serviceName : `${serviceName}.service`;
+      const showOut = await runBash(`systemctl show ${unit} -p Description,ActiveState,SubState,MainPID,ExecMainStartTimestamp,MemoryCurrent 2>/dev/null`);
+      const logsOut = await runBash(`journalctl -u ${unit} -n 10 --no-pager 2>/dev/null`);
+
+      const props = {};
+      (showOut || '').split('\n').forEach(l => {
+        const idx = l.indexOf('=');
+        if (idx !== -1) {
+          props[l.substring(0, idx).trim()] = l.substring(idx + 1).trim();
+        }
+      });
+
+      let memMb = 'N/A';
+      if (props.MemoryCurrent && !isNaN(props.MemoryCurrent)) {
+        memMb = `${(parseInt(props.MemoryCurrent, 10) / 1024 / 1024).toFixed(1)} MB`;
+      }
+
+      return {
+        name: unit,
+        displayName: props.Description || unit,
+        status: `${props.ActiveState || 'unknown'} (${props.SubState || 'unknown'})`,
+        mainPid: props.MainPID || 'N/A',
+        startedAt: props.ExecMainStartTimestamp || 'N/A',
+        memoryUsage: memMb,
+        recentLogs: logsOut || 'Tidak ada log terbaru.'
+      };
+    } catch (err) {
+      return { error: err.message };
+    }
+  },
+
+  /**
+   * Restart layanan tertentu (Cross-Platform)
+   */
+  async restartService(serviceName) {
+    if (!serviceName || !/^[a-zA-Z0-9_\-@\.]+$/.test(serviceName)) {
+      return { error: 'Nama layanan tidak valid' };
+    }
+
+    if (isWindows) {
+      const script = `Restart-Service -Name "${serviceName}" -Force; "Layanan ${serviceName} berhasil di-restart."`;
+      try {
+        const out = await runPowerShell(script);
+        return { success: true, message: out };
+      } catch (err) {
+        return { error: err.message };
+      }
+    }
+
+    // --- LINUX ---
+    try {
+      const unit = serviceName.endsWith('.service') ? serviceName : `${serviceName}.service`;
+      await runBash(`systemctl restart ${unit}`);
+      return { success: true, message: `Layanan ${unit} berhasil di-restart.` };
+    } catch (err) {
+      return { error: err.message };
+    }
   }
 };
 

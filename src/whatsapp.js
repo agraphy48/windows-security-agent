@@ -372,6 +372,7 @@ Contoh: \`PIN <kode_pin>\` atau langsung kirim angka PIN.
 
     msg += `-----------------------------------------\n`;
     msg += `📊 *A.* Laporan Status Seluruh Server (All Status)\n`;
+    msg += `📋 *S.* Laporan Seluruh Layanan & Aplikasi (All Services)\n`;
     msg += `🔒 *L.* Kunci Sesi Bot\n`;
     msg += `-----------------------------------------\n`;
     msg += `💡 *Ketik angka pilihan server (contoh: 1)*`;
@@ -422,6 +423,7 @@ Silakan balas dengan *NOMOR* tindakan:
 *8.* 🧱 Blokir Alamat IP di Firewall
 *9.* 🚨 Emergency Lockdown (Putus Akses Luar)
 *10.* 🌐 Restore Cloudflare Tunnel
+*11.* 📋 Inventori & Laporan Layanan/Aplikasi (Auto-Discovery)
 -----------------------------------------
 *0.* 🔙 Ganti / Pilih Server Lain
 *L.* 🔒 Kunci Sesi Bot
@@ -607,6 +609,138 @@ ${status}
     return await this.reply(senderJid, out);
   }
 
+  /**
+   * Menampilkan Menu Inventori Layanan & Aplikasi yang Terdeteksi Otomatis
+   */
+  async showServerServicesMenu(senderJid, cleanSender, targetNodeId, targetNodeName) {
+    await this.reply(senderJid, `⏳ Membaca inventori layanan & aplikasi pada *${targetNodeName}*...`);
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
+    let services;
+    if (isLocal) {
+      services = await security.getDiscoveredServices();
+    } else {
+      services = await cluster.dispatchCommand(targetNodeId, 'services');
+    }
+
+    if (!services || !Array.isArray(services) || services.length === 0) {
+      return await this.reply(senderJid, `ℹ️ Tidak ada data layanan yang ditemukan pada *${targetNodeName}*.`);
+    }
+
+    // Ambil maksimal 15 layanan (utamakan aplikasi terlebih dahulu)
+    const displayList = services.slice(0, 15);
+
+    this.userMenuState.set(cleanSender, {
+      step: 'SERVICES_MENU',
+      targetNodeId,
+      targetNodeName,
+      servicesList: displayList
+    });
+
+    let msg = `📋 *INVENTORI LAYANAN & APLIKASI (AUTO-DISCOVERY)*\n`;
+    msg += `*${targetNodeName.toUpperCase()}* (\`${targetNodeId}\`)\n`;
+    msg += `-----------------------------------------\n`;
+    msg += `Total terdeteksi: *${services.length}* layanan (Menampilkan ${displayList.length} teratas):\n\n`;
+
+    displayList.forEach((s, idx) => {
+      const portStr = s.ports && s.ports.length > 0 ? ` [Port: \`${s.ports.join(',')}\`]` : '';
+      const catIcon = s.category === 'application' ? '🌐' : '⚙️';
+      msg += `*${idx + 1}.* ${catIcon} *${s.name}*${portStr}\n`;
+      msg += `   ↳ ${s.displayName || s.desc || s.name} (${s.status})\n\n`;
+    });
+
+    msg += `-----------------------------------------\n`;
+    msg += `💡 *Ketik NOMOR layanan (contoh: 1)* untuk melihat *Laporan Detail Diagnostik & Log*.\n`;
+    msg += `💡 Ketik *all services* untuk ringkasan semua server.\n`;
+    msg += `💡 Ketik *0* untuk kembali ke menu tindakan server.`;
+
+    return await this.reply(senderJid, msg);
+  }
+
+  /**
+   * Menampilkan Laporan Detail Diagnostik untuk Layanan Tertentu
+   */
+  async showServiceDetailReport(senderJid, cleanSender, targetNodeId, targetNodeName, serviceName) {
+    await this.reply(senderJid, `⏳ Mengambil laporan diagnostik lengkap untuk *${serviceName}*...`);
+    const isLocal = !targetNodeId || targetNodeId === config.nodeId;
+
+    let detail;
+    if (isLocal) {
+      detail = await security.getServiceDetail(serviceName);
+    } else {
+      detail = await cluster.dispatchCommand(targetNodeId, 'service-detail', { name: serviceName });
+    }
+
+    if (!detail || detail.error) {
+      return await this.reply(senderJid, `❌ Gagal mengambil laporan layanan *${serviceName}*: ${detail?.error || 'Unknown error'}`);
+    }
+
+    let reportMsg = `📊 *LAPORAN DIAGNOSTIK LAYANAN: ${serviceName.toUpperCase()}*\n`;
+    reportMsg += `-----------------------------------------\n`;
+    reportMsg += `• *Server:* ${targetNodeName} (\`${targetNodeId}\`)\n`;
+    reportMsg += `• *Nama Unit:* \`${detail.name || serviceName}\`\n`;
+    reportMsg += `• *Deskripsi:* ${detail.displayName || '-'}\n`;
+    reportMsg += `• *Status Layanan:* 🟢 ${detail.status || 'Active'}\n`;
+    if (detail.mainPid && detail.mainPid !== 'N/A') reportMsg += `• *Main PID:* ${detail.mainPid}\n`;
+    if (detail.memoryUsage && detail.memoryUsage !== 'N/A') reportMsg += `• *Penggunaan RAM:* ${detail.memoryUsage}\n`;
+    if (detail.startedAt && detail.startedAt !== 'N/A') reportMsg += `• *Waktu Mulai:* ${detail.startedAt}\n`;
+
+    reportMsg += `-----------------------------------------\n`;
+    reportMsg += `📝 *Log Terakhir (Journal / Output):*\n`;
+    reportMsg += `\`\`\`${(detail.recentLogs || 'Tidak ada log tersedia.').substring(0, 500)}\`\`\`\n`;
+    reportMsg += `-----------------------------------------\n`;
+    reportMsg += `🛠️ *Opsi Tindakan Layanan:*\n`;
+    reportMsg += `• Ketik \`restart service ${serviceName}\` untuk restart layanan ini.\n`;
+    reportMsg += `• Ketik *services* untuk kembali ke daftar layanan.\n`;
+    reportMsg += `• Ketik *0* untuk menu utama server.`;
+
+    return await this.reply(senderJid, reportMsg);
+  }
+
+  /**
+   * Menampilkan Laporan Layanan & Aplikasi Seluruh Server Sekaligus
+   */
+  async showAllServersServicesReport(senderJid) {
+    await this.reply(senderJid, '⏳ Mengumpulkan inventori layanan dan aplikasi dari seluruh server di cluster...');
+    const nodes = Array.from(cluster.nodes.values());
+
+    let out = `📋 *LAPORAN INVENTORI APLIKASI LINTAS SERVER*\n-----------------------------------------\n`;
+
+    for (const node of nodes) {
+      const isLocal = node.nodeId === config.nodeId;
+      let services = [];
+
+      try {
+        if (isLocal) {
+          services = await security.getDiscoveredServices();
+        } else {
+          services = await cluster.dispatchCommand(node.nodeId, 'services');
+        }
+      } catch (err) {
+        services = { error: err.message };
+      }
+
+      const icon = node.status === 'online' ? '🟢' : '🔴';
+      out += `🖥️ *${node.name}* (\`${node.nodeId}\`) [${icon} ${node.status.toUpperCase()}]\n`;
+
+      if (Array.isArray(services) && services.length > 0) {
+        const apps = services.filter(s => s.category === 'application');
+        const displayApps = apps.length > 0 ? apps.slice(0, 8) : services.slice(0, 5);
+        displayApps.forEach(a => {
+          const portStr = a.ports && a.ports.length > 0 ? ` [Port: \`${a.ports.join(',')}\`]` : '';
+          out += `  • *${a.name}*${portStr} (Status: ${a.status})\n`;
+        });
+        out += `  ↳ *Total Layanan:* ${services.length} (${apps.length} aplikasi utama)\n\n`;
+      } else {
+        out += `  - Data layanan tidak dapat dimuat atau server offline.\n\n`;
+      }
+    }
+
+    out += `-----------------------------------------\n`;
+    out += `💡 Ketik *services* untuk melihat dan mengelola menu layanan detail pada server terpilih.`;
+    return await this.reply(senderJid, out);
+  }
+
   // =========================================================================
   // PROCESS COMMAND (MAIN DISPATCHER)
   // =========================================================================
@@ -637,6 +771,10 @@ ${status}
 
     if (lower === 'all status' || lower === 'status all' || lower === '!all status' || lower === 'a') {
       return await this.showAllServersStatus(senderJid);
+    }
+
+    if (lower === 'all services' || lower === 'services all' || lower === 'all apps' || lower === 'apps all' || lower === 'report all' || lower === '!all services' || lower === 's') {
+      return await this.showAllServersServicesReport(senderJid);
     }
 
     if (lower.startsWith('node ')) {
@@ -688,6 +826,21 @@ ${status}
         senderJid,
         `⚠️ Pilihan nomor tidak valid.\nSilakan balas dengan angka *1* sampai *${menuState.serverList.length}* untuk memilih server, atau ketik *A* untuk melihat semua server.`
       );
+    }
+
+    // KASUS S: Pengguna berada di menu INVENTORI LAYANAN (SERVICES_MENU)
+    if (menuState && menuState.step === 'SERVICES_MENU') {
+      const num = parseInt(raw, 10);
+      if (!isNaN(num) && num >= 1 && num <= menuState.servicesList.length) {
+        const chosen = menuState.servicesList[num - 1];
+        return await this.showServiceDetailReport(senderJid, cleanSender, menuState.targetNodeId, menuState.targetNodeName, chosen.name);
+      }
+      if (lower === '0' || lower === 'back' || lower === 'kembali') {
+        return await this.showServerActionsMenu(senderJid, cleanSender, menuState.targetNodeId);
+      }
+      if (lower === 'menu' || lower === 'monitor') {
+        return await this.showServerSelectionMenu(senderJid, cleanSender);
+      }
     }
 
     // KASUS B: Pengguna berada di menu TINDAKAN SERVER (SERVER_ACTIONS) atau Eksekusi Langsung
@@ -819,6 +972,28 @@ ${status}
       return await this.reply(senderJid, `✅ ${result}\n\n💡 Ketik *0* untuk ganti server.`);
     }
 
+    // 11. Inventori & Laporan Layanan / Aplikasi (Auto-Discovery)
+    if (lower === '11' || lower === '!11' || lower === 'services' || lower === '!services' || lower === 'apps' || lower === '!apps' || lower === 'report' || lower === 'layanan' || lower === 'aplikasi') {
+      return await this.showServerServicesMenu(senderJid, cleanSender, targetNodeId, targetNodeName);
+    }
+
+    // Restart Layanan Tertentu
+    if (lower.startsWith('restart service ') || (lower.startsWith('restart ') && !lower.startsWith('restart docker '))) {
+      const svcName = raw.replace(/^restart\s+(service\s+)?/i, '').trim().split(/\s+/)[0];
+      if (svcName) {
+        return await this.requestPinOrExecute(
+          senderJid,
+          cleanSender,
+          'restart_service',
+          svcName,
+          `Restart Layanan (${targetNodeName})`,
+          svcName,
+          null,
+          targetNodeId
+        );
+      }
+    }
+
     // 16. Fallback AI Response via Ollama
     await this.replyWithAI(senderJid, text);
   }
@@ -895,6 +1070,17 @@ _Konfirmasi berlaku 60 detik. Ketik *batal* untuk batalkan._
         result = res?.error ? `❌ Gagal: ${res.error}` : (typeof res === 'string' ? res : JSON.stringify(res));
       }
       return await this.reply(senderJid, `${result}\nUntuk mengaktifkan kembali, ketik *10* atau *!restore*.`);
+    }
+    if (action === 'restart_service') {
+      await this.reply(senderJid, `⏳ Merestart layanan *${target}* pada server *${targetNodeId || config.nodeId}*...`);
+      let result;
+      if (isLocal) {
+        result = await security.restartService(target);
+      } else {
+        const res = await cluster.dispatchCommand(targetNodeId, 'service-restart', { name: target });
+        result = res?.error ? `❌ Gagal: ${res.error}` : (res?.message || JSON.stringify(res));
+      }
+      return await this.reply(senderJid, `🔄 ${result.message || result}`);
     }
   }
 
