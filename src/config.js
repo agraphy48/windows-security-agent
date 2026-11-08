@@ -29,6 +29,10 @@ const config = {
   pinTimeoutMinutes: parseInt(process.env.PIN_TIMEOUT_MINUTES ?? '15', 10),
   intruderAlert: (process.env.INTRUDER_ALERT || 'true').toLowerCase() === 'true',
 
+  // Web Portal Dashboard Authentication
+  dashboardUser: process.env.DASHBOARD_USER || 'admin',
+  dashboardPass: process.env.DASHBOARD_PASS || process.env.SECURITY_PIN || '465157',
+
   // Cluster & High-Availability Failover Configuration
   clusterEnabled: (process.env.CLUSTER_ENABLED || 'false').toLowerCase() === 'true',
   clusterRole: (process.env.CLUSTER_ROLE || 'master').toLowerCase(), // 'master' | 'standby' | 'worker'
@@ -50,7 +54,15 @@ const config = {
     if (this.adminNumbers.length === 0) {
       return true;
     }
-    return this.adminNumbers.includes(cleanNumber);
+    if (this.adminNumbers.includes(cleanNumber)) {
+      return true;
+    }
+    try {
+      const contacts = require('./contacts');
+      return contacts.isEmergencyContact(cleanNumber);
+    } catch {
+      return false;
+    }
   },
 
   addAdmin(number) {

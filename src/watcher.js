@@ -205,7 +205,7 @@ Ketik *status* atau *node ${config.nodeId} status* untuk cek proses aktif.`;
     }
   }
 
-  async broadcastAlert(message) {
+  async broadcastAlert(message, category = 'all') {
     console.log(`[🔔 Security Alert]\n${message}`);
     if (!this.wa || !this.wa.sock) {
       // Jika node ini adalah worker/standby tanpa WA socket aktif, teruskan alert ke Master
@@ -216,14 +216,7 @@ Ketik *status* atau *node ${config.nodeId} status* untuk cek proses aktif.`;
       return;
     }
 
-    for (const adminNumber of config.adminNumbers) {
-      try {
-        const jid = `${adminNumber}@s.whatsapp.net`;
-        await this.wa.sock.sendMessage(jid, { text: message });
-      } catch (err) {
-        console.error(`[Watcher] Gagal kirim notif ke ${adminNumber}:`, err.message);
-      }
-    }
+    await this.wa.broadcastToAdmins(message, category);
   }
 }
 

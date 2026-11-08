@@ -8,6 +8,8 @@ const fs = require('fs');
 const config = require('./config');
 const security = require('./security');
 const cluster = require('./cluster');
+const webPortal = require('./webPortal');
+const contactsManager = require('./contacts');
 
 class WhatsAppClient {
   constructor() {
@@ -28,55 +30,23 @@ class WhatsAppClient {
   }
 
   startQrWebServer() {
-    this.httpServer = http.createServer((req, res) => {
-      if (req.url === '/' || req.url === '/qr') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        if (this.isConnected) {
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head><title>Security Agent Status</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-            <body style="font-family:sans-serif;text-align:center;padding:50px;background:#0d1117;color:#fff;">
-              <h1 style="color:#2ea44f;">✅ WhatsApp Terhubung!</h1>
-              <p>Security Agent siap memantau server.</p>
-              <p>Ketik <b>monitor</b> di WhatsApp untuk memilih server dan tindakan.</p>
-            </body>
-            </html>
-          `);
-        } else if (this.currentQrDataUrl) {
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>Scan WhatsApp Security Agent</title>
-              <meta name="viewport" content="width=device-width, initial-scale=1">
-              <meta http-equiv="refresh" content="5">
-            </head>
-            <body style="font-family:sans-serif;text-align:center;padding:30px;background:#0d1117;color:#fff;">
-              <h2>Scan QR Code WhatsApp Security Agent</h2>
-              <p>Buka WhatsApp di Ponsel &gt; Perangkat Tertaut &gt; Tautkan Perangkat</p>
-              <div style="background:#fff;padding:20px;display:inline-block;border-radius:12px;margin:20px 0;">
-                <img src="${this.currentQrDataUrl}" alt="WhatsApp QR Code" style="width:280px;height:280px;" />
-              </div>
-              <p style="color:#8b949e;font-size:14px;">Halaman akan memperbarui status otomatis setiap 5 detik.</p>
-            </body>
-            </html>
-          `);
-        } else {
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head><meta http-equiv="refresh" content="2"></head>
-            <body style="font-family:sans-serif;text-align:center;padding:50px;background:#0d1117;color:#fff;">
-              <h3>Membuat QR Code...</h3>
-              <p>Tunggu sebentar...</p>
-            </body>
-            </html>
-          `);
+    this.httpServer = http.createServer(async (req, res) => {
+      try {
+        // 1. Cek routing antarmuka Web Portal & API
+        const handled = await webPortal.handleRequest(req, res, this);
+        if (handled) {
+          return;
         }
-      } else {
-        res.writeHead(404);
-        res.end();
+        if (!res.headersSent) {
+          res.writeHead(404);
+          res.end();
+        }
+      } catch (err) {
+        console.error('[WebPortal Error]', err);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
       }
     });
 
@@ -84,7 +54,7 @@ class WhatsAppClient {
     cluster.init(this.httpServer);
 
     this.httpServer.listen(config.qrPort, () => {
-      console.log(`[🌐 QR Web Portal] Siap di http://localhost:${config.qrPort}`);
+      console.log(`[🌐 Web Portal & Cluster] Siap di http://localhost:${config.qrPort}`);
     });
   }
 
@@ -373,6 +343,7 @@ Contoh: \`PIN <kode_pin>\` atau langsung kirim angka PIN.
     msg += `-----------------------------------------\n`;
     msg += `📊 *A.* Laporan Status Seluruh Server (All Status)\n`;
     msg += `📋 *S.* Laporan Seluruh Layanan & Aplikasi (All Services)\n`;
+    msg += `👥 *K.* Nomor WhatsApp Urgensi & Web Portal (:5005)\n`;
     msg += `🔒 *L.* Kunci Sesi Bot\n`;
     msg += `-----------------------------------------\n`;
     msg += `💡 *Ketik angka pilihan server (contoh: 1)*`;
@@ -777,6 +748,38 @@ ${status}
       return await this.showAllServersServicesReport(senderJid);
     }
 
+    if (lower === 'contacts' || lower === 'kontak' || lower === 'nomor darurat' || lower === '!contacts' || lower === '!kontak' || lower === 'k') {
+      const list = contactsManager.getAll();
+      let out = `👥 *NOMOR WHATSAPP PENERIMA NOTIFIKASI URGENSI*\n-----------------------------------------\n`;
+      if (list.length === 0) {
+        out += `Belum ada nomor darurat terdaftar.\n`;
+      } else {
+        list.forEach((c, i) => {
+          const icon = c.active !== false ? '🟢' : '⚪';
+          out += `*${i + 1}.* *${c.name}* (${c.role})\n`;
+          out += `   • No: \`+${c.number}\` [${icon} ${c.active !== false ? 'Aktif' : 'Nonaktif'}]\n`;
+          out += `   • Alert: \`${c.alerts.join(', ')}\`\n\n`;
+        });
+      }
+      out += `-----------------------------------------\n`;
+      out += `🌐 *Web Portal Manajemen (Form Login):*\n👉 \`http://localhost:${config.clusterPort}/dashboard\`\n\n`;
+      out += `💡 Ketik *tambah kontak <nomor> <nama>* untuk mendaftarkan nomor baru via chat.\n`;
+      out += `💡 Ketik *0* atau *menu* untuk kembali.`;
+      return await this.reply(senderJid, out);
+    }
+
+    if (lower.startsWith('tambah kontak ') || lower.startsWith('!tambah kontak ')) {
+      const parts = raw.replace(/^(!)?tambah kontak\s+/i, '').trim().split(/\s+/);
+      const num = parts[0];
+      const name = parts.slice(1).join(' ') || 'SysAdmin';
+      try {
+        const res = contactsManager.addContact({ number: num, name, alerts: ['all'] });
+        return await this.reply(senderJid, `✅ *Berhasil Mendaftarkan Kontak Darurat:*\n-----------------------------------------\n• *Nama:* ${name}\n• *Nomor:* \`+${res.contact.number}\`\n• *Status:* 🟢 Aktif menerima pesan urgensi (serangan, server down, dll)\n-----------------------------------------\n💡 Kelola atau uji coba pengiriman via Web Portal: \`http://localhost:${config.clusterPort}/dashboard\``);
+      } catch (err) {
+        return await this.reply(senderJid, `❌ Gagal mendaftarkan kontak: ${err.message}`);
+      }
+    }
+
     if (lower.startsWith('node ')) {
       const parts = raw.split(/\s+/);
       if (parts.length < 3) {
@@ -1133,17 +1136,19 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
     }
   }
 
-  async broadcastToAdmins(message) {
+  async broadcastToAdmins(message, category = null) {
     if (!this.sock) {
       console.warn('[WA Broadcast] Tidak dapat mengirim pesan: WhatsApp sock belum siap.');
       return;
     }
-    for (const adminNumber of config.adminNumbers) {
+    const recipients = contactsManager.getActiveNumbers(category);
+    for (const number of recipients) {
       try {
-        const jid = `${adminNumber}@s.whatsapp.net`;
+        const jid = `${number}@s.whatsapp.net`;
         await this.sock.sendMessage(jid, { text: message });
+        contactsManager.updateLastAlert(number);
       } catch (err) {
-        console.error(`[WA Broadcast] Gagal kirim notif ke ${adminNumber}:`, err.message);
+        console.error(`[WA Broadcast] Gagal kirim notif ke ${number}:`, err.message);
       }
     }
   }

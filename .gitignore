@@ -8,6 +8,7 @@ session_auth/
 # Environment & Rahasia Server
 .env
 .env.local
+inventory/*.json
 
 # Logs
 npm-debug.log*
