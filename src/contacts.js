@@ -143,6 +143,22 @@ class ContactsManager {
     const idx = this.contacts.findIndex(c => c.id === idOrNumber || c.number === idOrNumber);
     if (idx < 0) return false;
     const removed = this.contacts.splice(idx, 1)[0];
+
+    // Hapus juga dari config.adminNumbers jika terdaftar di sana
+    if (config.adminNumbers && config.adminNumbers.includes(removed.number)) {
+      config.adminNumbers = config.adminNumbers.filter(n => n !== removed.number);
+      try {
+        const envPath = path.join(__dirname, '..', '.env');
+        if (fs.existsSync(envPath)) {
+          let content = fs.readFileSync(envPath, 'utf8');
+          content = content.replace(/ADMIN_NUMBERS=.*/g, `ADMIN_NUMBERS=${config.adminNumbers.join(',')}`);
+          fs.writeFileSync(envPath, content, 'utf8');
+        }
+      } catch (e) {
+        console.error('[Contacts] Gagal update .env saat hapus kontak:', e.message);
+      }
+    }
+
     this.save();
     return removed;
   }
