@@ -748,16 +748,22 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
 
         <!-- Tab 2: QR Code Scan -->
         <div id="tabContentQr" style="display:none;text-align:center;padding:20px 0;">
-          <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">
+          <p style="color:#94a3b8;font-size:13px;margin-bottom:12px;">
             Arahkan kamera WhatsApp di ponsel ke QR Code berikut:
           </p>
-          <div id="qrImageContainer" style="background:#fff;padding:16px;display:inline-block;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.5);">
-            <div id="qrLoadingText" style="color:#000;font-size:13px;padding:50px;">Memuat QR Code...</div>
-            <img id="botQrImg" src="" alt="WhatsApp QR" style="display:none;width:240px;height:240px;">
+          <div id="qrImageContainer" style="background:#fff;padding:16px;display:inline-block;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.5);min-width:270px;min-height:270px;">
+            <div id="qrLoadingText" style="color:#0f172a;font-size:13px;padding:90px 20px;font-weight:600;">⏳ Memuat QR Code WhatsApp...</div>
+            <img id="botQrImg" src="" alt="WhatsApp QR" style="display:none;width:240px;height:240px;margin:0 auto;">
           </div>
-          <div style="margin-top:16px;">
-            <button onclick="loadBotQr()" class="btn-action btn-toggle" style="padding:8px 16px;">🔄 Perbarui QR Code</button>
+          <div style="margin-top:14px;display:flex;justify-content:center;align-items:center;gap:12px;flex-wrap:wrap;">
+            <button onclick="loadBotQr(true)" class="btn-action btn-toggle" style="padding:8px 16px;">🔄 Perbarui QR</button>
+            <a href="/qr" target="_blank" style="color:#60a5fa;font-size:12px;text-decoration:none;font-weight:600;padding:8px 12px;background:#0f172a;border-radius:6px;border:1px solid var(--border);">
+              🔗 Buka Halaman QR Penuh (/qr)
+            </a>
           </div>
+          <p style="color:#64748b;font-size:11px;margin-top:8px;">
+            🔄 Otomatis memperbarui QR setiap 3 detik agar selalu valid.
+          </p>
         </div>
       </div>
     </div>
@@ -1083,6 +1089,7 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
     // ==========================================
     let currentRawPairingCode = '';
     let pairingTimerInterval = null;
+    let qrPollInterval = null;
 
     function switchBotTab(tab) {
       const tabPairing = document.getElementById('tabContentPairing');
@@ -1095,12 +1102,19 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         tabQr.style.display = 'none';
         btnPairing.classList.add('active');
         btnQr.classList.remove('active');
+        if (qrPollInterval) {
+          clearInterval(qrPollInterval);
+          qrPollInterval = null;
+        }
       } else {
         tabPairing.style.display = 'none';
         tabQr.style.display = 'block';
         btnPairing.classList.remove('active');
         btnQr.classList.add('active');
-        loadBotQr();
+        loadBotQr(true);
+        if (!qrPollInterval) {
+          qrPollInterval = setInterval(loadBotQr, 2500);
+        }
       }
     }
 
@@ -1113,6 +1127,10 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         const disconnectedBox = document.getElementById('botDisconnectedBox');
 
         if (data.isConnected) {
+          if (qrPollInterval) {
+            clearInterval(qrPollInterval);
+            qrPollInterval = null;
+          }
           badge.innerHTML = '<span class="badge badge-active" style="font-size:12px;padding:6px 12px;">🟢 ONLINE (TERHUBUNG)</span>';
           connectedBox.style.display = 'block';
           disconnectedBox.style.display = 'none';
@@ -1225,16 +1243,27 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
       }
     }
 
-    async function loadBotQr() {
+    async function loadBotQr(isManual = false) {
       const qrImg = document.getElementById('botQrImg');
       const loading = document.getElementById('qrLoadingText');
+      if (isManual) {
+        loading.innerText = 'Memperbarui QR Code...';
+        loading.style.display = 'block';
+        qrImg.style.display = 'none';
+      }
       try {
         const res = await fetch('/api/bot/qr');
         const data = await res.json();
         if (data.isConnected) {
+          if (qrPollInterval) {
+            clearInterval(qrPollInterval);
+            qrPollInterval = null;
+          }
           loadBotStatus();
         } else if (data.qr) {
-          qrImg.src = data.qr;
+          if (qrImg.src !== data.qr) {
+            qrImg.src = data.qr;
+          }
           qrImg.style.display = 'block';
           loading.style.display = 'none';
         } else {
