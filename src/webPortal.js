@@ -107,6 +107,7 @@ class WebPortal {
     this.testWaLimiter = new RateLimiter(60 * 1000, 5); // Max 5 tes WA/menit
     this.botPairLimiter = new RateLimiter(5 * 60 * 1000, 5); // Max 5 pairing req/5 menit
     this.contactsWriteLimiter = new RateLimiter(60 * 1000, 30); // Max 30 modifikasi kontak/menit
+    this.pinChangeLimiter = new RateLimiter(10 * 60 * 1000, 5); // Max 5 ganti PIN per 10 menit
 
     setInterval(() => this.periodicCleanup(), 5 * 60 * 1000).unref();
   }
@@ -542,6 +543,19 @@ class WebPortal {
         }
         const id = url.replace('/api/contacts/', '').replace('/test', '');
         await this.handleApiTestContact(req, res, id, waClient);
+        return true;
+      }
+
+      // 3.1 API Modul Manajemen Security PIN
+      if (url === '/api/security/pin' && method === 'POST') {
+        const rateKey = session?.username || clientIp;
+        if (this.pinChangeLimiter.isLimited(rateKey)) {
+          const waitSec = this.pinChangeLimiter.getResetTime(rateKey);
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: `Terlalu banyak permintaan perubahan PIN. Coba lagi dalam ${waitSec || 60} detik.` }));
+          return true;
+        }
+        await this.handleApiChangePin(req, res, session, clientIp, waClient);
         return true;
       }
 
@@ -1205,6 +1219,141 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: false, error: `Gagal mengirim pesan WhatsApp: ${err.message}` }));
+    }
+  }
+
+  async handleApiChangePin(req, res, session, clientIp, waClient) {
+    if (!session || !session.authenticated) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Akses tidak sah. Silakan login kembali.' }));
+    }
+
+    let body = {};
+    try {
+      body = await this.readBody(req);
+    } catch (err) {
+      if (err.statusCode === 413) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: false, error: 'Ukuran payload melebihi batas (1MB).' }));
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Format JSON payload tidak valid.' }));
+    }
+
+    const currentPin = String(body.currentPin || '').trim();
+    const newPin = String(body.newPin || '').trim();
+    const confirmPin = String(body.confirmPin || '').trim();
+
+    // 1. Verifikasi PIN lama menggunakan timing-safe comparison
+    if (!safeCompare(currentPin, String(config.securityPin || ''))) {
+      logAuthEvent('PIN_CHANGE_FAILED', clientIp, session.username, 'Current PIN mismatch');
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'PIN keamanan saat ini salah.' }));
+    }
+
+    // 2. Validasi format PIN baru (4-8 digit numerik)
+    if (!/^[0-9]{4,8}$/.test(newPin)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'PIN baru harus terdiri dari 4 hingga 8 digit angka numerik.' }));
+    }
+
+    // 3. Validasi konfirmasi PIN
+    if (newPin !== confirmPin) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Konfirmasi PIN baru tidak sesuai.' }));
+    }
+
+    // 4. Pastikan PIN baru berbeda dari PIN saat ini
+    if (safeCompare(newPin, String(config.securityPin || ''))) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'PIN baru tidak boleh sama dengan PIN keamanan saat ini.' }));
+    }
+
+    // 5. Update konfigurasi in-memory & environment variables
+    config.securityPin = newPin;
+    config.dashboardPass = newPin;
+    process.env.SECURITY_PIN = newPin;
+    process.env.DASHBOARD_PASS = newPin;
+
+    // 6. Update file .env secara persisten di disk
+    this.updateEnvPin(newPin);
+
+    // 7. Reset sesi aktif WhatsApp bot (force re-authorization)
+    if (waClient) {
+      if (waClient.adminSessions && typeof waClient.adminSessions.clear === 'function') {
+        waClient.adminSessions.clear();
+      }
+      if (waClient.pendingActions && typeof waClient.pendingActions.clear === 'function') {
+        waClient.pendingActions.clear();
+      }
+      if (waClient.pendingCommands && typeof waClient.pendingCommands.clear === 'function') {
+        waClient.pendingCommands.clear();
+      }
+    }
+
+    // 8. Sinkronisasi perubahan PIN ke seluruh cluster nodes
+    let clusterSync = [];
+    if (cluster && typeof cluster.broadcastPinUpdate === 'function') {
+      try {
+        clusterSync = await cluster.broadcastPinUpdate(newPin);
+      } catch (err) {
+        console.error('[WebPortal] Gagal broadcast sinkronisasi PIN ke cluster:', err.message);
+      }
+    }
+
+    // 9. Kirim broadcast alert darurat via WhatsApp ke admin
+    if (waClient && waClient.sock && waClient.isConnected) {
+      const alertMsg = 
+`🔐 *PERINGATAN KEAMANAN: PIN SISTEM TELAH DIUBAH* 🔐
+-----------------------------------------
+• *Waktu:* ${new Date().toLocaleString('id-ID')}
+• *Diubah oleh:* Admin Web Portal (${session.username})
+• *IP Pelaku:* ${clientIp}
+• *Sesi Bot:* Seluruh sesi bot aktif telah direset demi keamanan.
+• *Cluster:* ${clusterSync.length > 0 ? 'Tersinkronisasi ke armada node' : 'Node lokal'}
+-----------------------------------------
+_Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
+
+      for (const adminNum of config.adminNumbers) {
+        try {
+          await waClient.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
+        } catch (e) {}
+      }
+    }
+
+    // 10. Audit log
+    logAuthEvent('PIN_CHANGED', clientIp, session.username, 'Security PIN updated and synced to cluster');
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ 
+      success: true, 
+      message: 'PIN Keamanan berhasil diubah dan disinkronkan ke seluruh sistem!',
+      clusterSync
+    }));
+  }
+
+  updateEnvPin(newPin) {
+    try {
+      const envPath = path.join(__dirname, '..', '.env');
+      if (!fs.existsSync(envPath)) {
+        fs.writeFileSync(envPath, `SECURITY_PIN=${newPin}\nDASHBOARD_PASS=${newPin}\n`, 'utf8');
+        return;
+      }
+      let content = fs.readFileSync(envPath, 'utf8');
+      if (/^SECURITY_PIN=/m.test(content)) {
+        content = content.replace(/^SECURITY_PIN=.*/m, `SECURITY_PIN=${newPin}`);
+      } else {
+        content += `\nSECURITY_PIN=${newPin}`;
+      }
+      if (/^DASHBOARD_PASS=/m.test(content)) {
+        content = content.replace(/^DASHBOARD_PASS=.*/m, `DASHBOARD_PASS=${newPin}`);
+      } else {
+        content += `\nDASHBOARD_PASS=${newPin}`;
+      }
+      fs.writeFileSync(envPath, content, 'utf8');
+      console.log(`[🔐 WebPortal] File .env berhasil diperbarui dengan PIN baru.`);
+    } catch (err) {
+      console.error('[WebPortal] Gagal menulis update PIN ke .env:', err.message);
     }
   }
 
@@ -1999,6 +2148,37 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
           </form>
         </div>
 
+        <!-- Kartu Manajemen Security PIN -->
+        <div class="card" style="margin-bottom: 24px; border-left: 4px solid #f59e0b;">
+          <h2 class="card-title">🔐 Manajemen Security PIN</h2>
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px;line-height:1.5;">
+            PIN ini mengontrol otorisasi perintah keamanan di bot WhatsApp dan password akun login admin Web Portal.
+          </p>
+          <form id="changePinForm">
+            <div class="form-group">
+              <label for="currentPin">PIN Keamanan Saat Ini</label>
+              <input type="password" id="currentPin" placeholder="Masukkan PIN lama" maxlength="8" required style="letter-spacing:3px;">
+            </div>
+            <div class="form-group">
+              <label for="newPin">PIN Keamanan Baru (4-8 Digit Angka)</label>
+              <input type="password" id="newPin" placeholder="Contoh: 849201" pattern="[0-9]{4,8}" maxlength="8" required style="letter-spacing:3px;">
+              <span style="font-size:11px;color:var(--text-muted);margin-top:4px;display:block;">Wajib 4 hingga 8 digit angka numerik (0-9).</span>
+            </div>
+            <div class="form-group">
+              <label for="confirmPin">Konfirmasi PIN Baru</label>
+              <input type="password" id="confirmPin" placeholder="Ulangi PIN baru" pattern="[0-9]{4,8}" maxlength="8" required style="letter-spacing:3px;">
+            </div>
+            <div style="margin-bottom:14px;display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" id="showPinToggle" onchange="toggleShowPins(this.checked)" style="cursor:pointer;">
+              <label for="showPinToggle" style="font-size:12px;color:#94a3b8;cursor:pointer;margin-bottom:0;">Tampilkan Angka PIN</label>
+            </div>
+            <button type="submit" id="btnChangePin" class="btn-primary" style="background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
+              🔒 Perbarui PIN &amp; Sinkronkan Cluster
+            </button>
+          </form>
+          <div id="pinChangeNotice" style="display:none;margin-top:14px;padding:12px;border-radius:8px;font-size:12px;line-height:1.5;background:#064e3b;color:#a7f3d0;border:1px solid #059669;"></div>
+        </div>
+
         <!-- Kartu Armada Server -->
         <div class="card">
           <h2 class="card-title">🌐 Status Armada Server Cluster</h2>
@@ -2465,6 +2645,64 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         loading.innerText = 'Gagal memuat QR: ' + err.message;
       }
     }
+
+    function toggleShowPins(show) {
+      const type = show ? 'text' : 'password';
+      document.getElementById('currentPin').type = type;
+      document.getElementById('newPin').type = type;
+      document.getElementById('confirmPin').type = type;
+    }
+
+    document.getElementById('changePinForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const currentPin = document.getElementById('currentPin').value.trim();
+      const newPin = document.getElementById('newPin').value.trim();
+      const confirmPin = document.getElementById('confirmPin').value.trim();
+      const notice = document.getElementById('pinChangeNotice');
+      const btn = document.getElementById('btnChangePin');
+
+      if (!/^[0-9]{4,8}$/.test(newPin)) {
+        showToast('❌ PIN baru harus terdiri dari 4-8 digit angka numerik!', true);
+        return;
+      }
+      if (newPin !== confirmPin) {
+        showToast('❌ Konfirmasi PIN baru tidak cocok!', true);
+        return;
+      }
+      if (currentPin === newPin) {
+        showToast('❌ PIN baru tidak boleh sama dengan PIN saat ini!', true);
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = '⏳ Menyimpan & Menyinkronkan Cluster...';
+      notice.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/security/pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ currentPin, newPin, confirmPin })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast('✅ ' + data.message);
+          document.getElementById('changePinForm').reset();
+          notice.style.display = 'block';
+          notice.innerHTML = '<b>🎉 PIN Keamanan Berhasil Diperbarui!</b><br>' +
+            '• PIN baru telah aktif untuk Bot WhatsApp &amp; Login Dashboard.<br>' +
+            '• Seluruh sesi bot aktif telah direset demi keamanan.<br>' +
+            '• Sinkronisasi cluster node selesai.';
+        } else {
+          showToast('❌ Gagal: ' + (data.error || 'Terjadi kesalahan'), true);
+        }
+      } catch (err) {
+        showToast('❌ Error: ' + err.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '🔒 Perbarui PIN & Sinkronkan Cluster';
+      }
+    });
 
     // Inisialisasi awal
     toggleAlertCheckboxes(document.getElementById('alertAll'));

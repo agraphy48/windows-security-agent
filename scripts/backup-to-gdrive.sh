@@ -79,3 +79,4 @@ ls -t "${BACKUP_DIR}"/vps-backup-*.tar.gz 2>/dev/null | tail -n +2 | xargs -r rm
 echo "===================================================="
 echo " [$(date)] BACKUP SELESAI DAN SUKSES TERSINKRON KE GDRIVE!"
 echo "===================================================="
+

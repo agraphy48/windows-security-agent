@@ -408,7 +408,7 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
 `🔒 *BOT KEAMANAN TERKUNCI* 🔒
 -----------------------------------------
 Silakan masukkan angka PIN keamanan Anda (${config.securityPin.length} digit):
-Contoh: langsung kirim \`${config.securityPin}\` atau \`monitor ${config.securityPin}\`
+Contoh: langsung kirim angka PIN Anda (misal: \`123456\`) atau \`monitor 123456\`
 -----------------------------------------`
           );
         }
@@ -497,8 +497,8 @@ Terdeteksi percobaan pembobolan PIN bot WhatsApp server!
 Semua perintah membutuhkan verifikasi PIN.
 
 Silakan masukkan PIN keamanan Anda:
-Contoh: langsung kirim angka PIN (misal: \`${config.securityPin}\`)
-Atau sertakan di akhir perintah: \`monitor ${config.securityPin}\`
+Contoh: langsung kirim angka PIN Anda (misal: \`123456\`)
+Atau sertakan di akhir perintah: \`monitor 123456\`
 -----------------------------------------`
         );
       }

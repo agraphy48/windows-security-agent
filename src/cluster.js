@@ -334,6 +334,16 @@ class ClusterManager {
       if (command === 'backup-trigger') {
         return await security.triggerGdriveBackup();
       }
+      if (command === 'sync-pin') {
+        const pin = String(params.pin || '').trim();
+        if (!/^[0-9]{4,8}$/.test(pin)) return { error: 'Format PIN tidak valid (harus 4-8 digit angka)' };
+        config.securityPin = pin;
+        config.dashboardPass = pin;
+        process.env.SECURITY_PIN = pin;
+        process.env.DASHBOARD_PASS = pin;
+        this.updateLocalEnvPin(pin);
+        return { success: true, message: `PIN berhasil disinkronkan di node ${config.nodeName} (${config.nodeId})` };
+      }
       return { error: `Perintah tidak dikenal: ${command}` };
     } catch (err) {
       return { error: err.message };
@@ -622,6 +632,58 @@ class ClusterManager {
     }
 
     return { error: `Gagal mengirim perintah ke ${node.name}: ${lastError ? lastError.message : 'Tidak ada respons'}` };
+  }
+
+  /**
+   * Perbarui file .env lokal dengan PIN baru
+   */
+  updateLocalEnvPin(newPin) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const envPath = path.join(__dirname, '..', '.env');
+      if (!fs.existsSync(envPath)) return;
+      let content = fs.readFileSync(envPath, 'utf8');
+      if (/^SECURITY_PIN=/m.test(content)) {
+        content = content.replace(/^SECURITY_PIN=.*/m, `SECURITY_PIN=${newPin}`);
+      } else {
+        content += `\nSECURITY_PIN=${newPin}`;
+      }
+      if (/^DASHBOARD_PASS=/m.test(content)) {
+        content = content.replace(/^DASHBOARD_PASS=.*/m, `DASHBOARD_PASS=${newPin}`);
+      } else {
+        content += `\nDASHBOARD_PASS=${newPin}`;
+      }
+      fs.writeFileSync(envPath, content, 'utf8');
+      console.log(`[🔐 Cluster] File .env lokal berhasil diperbarui dengan PIN tersinkron.`);
+    } catch (err) {
+      console.error('[Cluster] Gagal sinkronisasi PIN ke .env:', err.message);
+    }
+  }
+
+  /**
+   * Siarkan pembaruan PIN keamanan ke seluruh node cluster
+   */
+  async broadcastPinUpdate(newPin) {
+    const results = [];
+    for (const [id, node] of this.nodes.entries()) {
+      if (id === config.nodeId) continue;
+      if (node.status === 'offline') {
+        results.push({ id, name: node.name, success: false, error: 'Node sedang offline' });
+        continue;
+      }
+      try {
+        const res = await this.dispatchCommand(id, 'sync-pin', { pin: newPin });
+        if (res && res.error) {
+          results.push({ id, name: node.name, success: false, error: res.error });
+        } else {
+          results.push({ id, name: node.name, success: true, message: res?.message || 'OK' });
+        }
+      } catch (err) {
+        results.push({ id, name: node.name, success: false, error: err.message });
+      }
+    }
+    return results;
   }
 
   /**
