@@ -40,6 +40,7 @@ const config = {
   nodeId: process.env.NODE_ID || 'node-01',
   nodeName: process.env.NODE_NAME || 'Server Utama (Windows)',
   clusterPort: parseInt(process.env.CLUSTER_PORT || '5005', 10),
+  clusterUrl: process.env.CLUSTER_URL || '',
   masterUrl: rawMasterUrl,
   knownWorkers: (process.env.KNOWN_WORKERS || '')
     .split(',')

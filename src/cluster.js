@@ -515,7 +515,7 @@ class ClusterManager {
         nodeId: config.nodeId,
         name: config.nodeName,
         role: this.role,
-        url: `http://localhost:${config.clusterPort}`
+        url: config.clusterUrl || `http://localhost:${config.clusterPort}`
       });
       if (response && response.nodeId && response.nodeId !== config.nodeId) {
         console.log(`[🌐 Cluster] Master mengalokasikan Node ID baru: ${response.nodeId} (sebelumnya: ${config.nodeId})`);
@@ -546,15 +546,35 @@ class ClusterManager {
       return { error: `Node "${node.name}" sedang OFFLINE / tidak dapat dihubungi.` };
     }
 
-    try {
-      const response = await this.postJson(`${node.url}/api/cluster/execute`, {
-        command,
-        params
-      });
-      return response.result;
-    } catch (err) {
-      return { error: `Gagal mengirim perintah ke ${node.name}: ${err.message}` };
+    const candidateUrls = [node.url];
+    // Fallback otomatis untuk node-01 (Server Windows) via Tailscale relay jika URL utama tidak tembus
+    if (targetNodeId === 'node-01' || (node.name && node.name.toLowerCase().includes('windows'))) {
+      const relayUrl = 'http://100.110.122.22:5006';
+      if (!candidateUrls.includes(relayUrl)) {
+        candidateUrls.push(relayUrl);
+      }
     }
+
+    let lastError = null;
+    for (const targetUrl of candidateUrls) {
+      try {
+        const response = await this.postJson(`${targetUrl}/api/cluster/execute`, {
+          command,
+          params
+        }, 6000);
+        if (response && response.success !== false) {
+          if (node.url !== targetUrl) {
+            console.log(`[🌐 Cluster] Mengalihkan rute ${node.name} ke URL aktif: ${targetUrl}`);
+            node.url = targetUrl;
+          }
+          return response.result;
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    return { error: `Gagal mengirim perintah ke ${node.name}: ${lastError ? lastError.message : 'Tidak ada respons'}` };
   }
 
   /**
