@@ -34,6 +34,15 @@ const config = {
   dashboardPass: process.env.DASHBOARD_PASS || process.env.SECURITY_PIN || '465157',
   dashboard2Fa: (process.env.DASHBOARD_2FA ?? 'true').toLowerCase() === 'true',
 
+  // Email & 2FA Configuration
+  adminEmail: process.env.ADMIN_EMAIL || 'agraphylearn@gmail.com',
+  smtpHost: process.env.SMTP_HOST || '',
+  smtpPort: parseInt(process.env.SMTP_PORT || '587', 10),
+  smtpSecure: (process.env.SMTP_SECURE || 'false').toLowerCase() === 'true',
+  smtpUser: process.env.SMTP_USER || '',
+  smtpPass: process.env.SMTP_PASS || '',
+  smtpFrom: process.env.SMTP_FROM || '',
+
   // Cluster & High-Availability Failover Configuration
   clusterEnabled: (process.env.CLUSTER_ENABLED || 'false').toLowerCase() === 'true',
   clusterRole: (process.env.CLUSTER_ROLE || 'master').toLowerCase(), // 'master' | 'standby' | 'worker'

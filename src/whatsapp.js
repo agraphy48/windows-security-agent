@@ -368,7 +368,7 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
 
     // 1. Cek perintah KUNCI manual
     const trimmedLower = text.trim().toLowerCase();
-    if (trimmedLower === 'lock' || trimmedLower === '!lock' || trimmedLower === 'kunci' || trimmedLower === '12' || trimmedLower === '!12' || trimmedLower === 'l') {
+    if (trimmedLower === 'lock' || trimmedLower === '!lock' || trimmedLower === 'kunci' || trimmedLower === 'l') {
       this.adminSessions.delete(cleanSender);
       this.pendingCommands.delete(cleanSender);
       this.pendingActions.delete(cleanSender);
@@ -582,6 +582,8 @@ Atau sertakan di akhir perintah: \`monitor ${config.securityPin}\`
     });
 
     msg += `-----------------------------------------\n`;
+    msg += `🌐 *C.* Status Arsitektur Cluster & Jaringan (Semua Node)\n`;
+    msg += `☁️ *B.* Status Backup Server VPS ke Google Drive\n`;
     msg += `📊 *A.* Laporan Status Seluruh Server (All Status)\n`;
     msg += `📋 *S.* Laporan Seluruh Layanan & Aplikasi (All Services)\n`;
     msg += `👥 *K.* Nomor WhatsApp Urgensi & Web Portal (:5005)\n`;
@@ -636,6 +638,9 @@ Silakan balas dengan *NOMOR* tindakan:
 *9.* 🚨 Emergency Lockdown (Putus Akses Luar)
 *10.* 🌐 Restore Cloudflare Tunnel
 *11.* 📋 Inventori & Laporan Layanan/Aplikasi (Auto-Discovery)
+*12.* 🌐 Status Jaringan & Topologi Cluster
+*13.* ☁️ Status Backup Server VPS ke Google Drive
+*14.* 🚀 Jalankan Backup ke Google Drive Sekarang (Trigger Backup)
 -----------------------------------------
 *0.* 🔙 Ganti / Pilih Server Lain
 *L.* 🔒 Kunci Sesi Bot
@@ -953,6 +958,86 @@ ${status}
     return await this.reply(senderJid, out);
   }
 
+  async executeClusterStatus(senderJid) {
+    await this.reply(senderJid, `⏳ Mengumpulkan status arsitektur & topologi jaringan cluster...`);
+    const report = cluster.getClusterStatusReport();
+    return await this.reply(senderJid, `${report}\n💡 Ketik *0* untuk kembali ke pilihan server.`);
+  }
+
+  async executeGdriveBackupStatus(senderJid) {
+    await this.reply(senderJid, `⏳ Mengambil status backup Google Drive dari Server VPS (node-02)...`);
+    try {
+      let res;
+      if (config.nodeId === 'node-02' || !cluster.nodes.has('node-02')) {
+        res = await security.getGdriveBackupStatus();
+      } else {
+        res = await cluster.dispatchCommand('node-02', 'backup-status');
+      }
+
+      if (!res || res.error) {
+        return await this.reply(senderJid, `❌ Gagal mengambil status backup VPS: ${res?.error || 'Tidak ada respons dari node-02'}\n\n💡 Ketik *0* untuk kembali.`);
+      }
+
+      const isRunning = res.isRunning;
+      const statusIcon = isRunning ? '🔄 SEDANG BERJALAN' : '✅ STANDBY / TERJADWAL';
+      const nowWib = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+
+      let out = `☁️ *STATUS BACKUP IMAGE SERVER VPS KE GOOGLE DRIVE*\n`;
+      out += `-----------------------------------------\n`;
+      out += `• Status Engine: *${statusIcon}*\n`;
+      out += `• Jadwal Otomatis: *${res.cronSchedule || '02:00 WIB Setiap Hari'}*\n`;
+      out += `• Waktu Pengecekan: ${nowWib} WIB\n`;
+      out += `-----------------------------------------\n\n`;
+
+      out += `📁 *Google Drive Remote (gdrive:VPS_MIGRATION_BACKUP):*\n`;
+      if (res.gdriveLatest) {
+        out += `• *Image Terbaru:* \`${res.gdriveLatest}\`\n`;
+      }
+      if (res.gdriveArchives) {
+        out += `• *Riwayat Arsip Lainnya:*\n\`\`\`\n${res.gdriveArchives}\n\`\`\`\n`;
+      }
+
+      out += `\n💾 *Penyimpanan Lokal VPS (/backup):*\n`;
+      out += `\`\`\`\n${res.localFiles || 'Tidak ada arsip lokal'}\n\`\`\`\n\n`;
+
+      out += `📋 *Log Eksekusi Terakhir:* \n`;
+      out += `\`\`\`\n${res.lastLogs || 'Tidak ada log backup'}\n\`\`\`\n`;
+      out += `-----------------------------------------\n`;
+      out += `💡 Ketik *14* untuk menjalankan (trigger) backup sekarang.\n`;
+      out += `💡 Ketik *0* untuk kembali ke menu server.`;
+
+      return await this.reply(senderJid, out);
+    } catch (err) {
+      return await this.reply(senderJid, `❌ Terjadi kesalahan saat memeriksa backup: ${err.message}\n\n💡 Ketik *0* untuk kembali.`);
+    }
+  }
+
+  async executeGdriveBackupTrigger(senderJid) {
+    await this.reply(senderJid, `⏳ Memeriksa dan memicu proses backup VPS ke Google Drive...`);
+    try {
+      let res;
+      if (config.nodeId === 'node-02' || !cluster.nodes.has('node-02')) {
+        res = await security.triggerGdriveBackup();
+      } else {
+        res = await cluster.dispatchCommand('node-02', 'backup-trigger');
+      }
+
+      if (res && res.success) {
+        return await this.reply(
+          senderJid,
+          `🚀 *PERINTAH BACKUP BERHASIL DIPICU!*\n\n${res.message}\n\n💡 Ketik *13* beberapa menit lagi untuk melihat progres & status file di Google Drive.`
+        );
+      } else {
+        return await this.reply(
+          senderJid,
+          `⚠️ *GAGAL MEMULAI BACKUP*\n\n${res?.message || res?.error || 'Tidak ada respons dari server VPS'}\n\n💡 Ketik *13* untuk melihat status saat ini.`
+        );
+      }
+    } catch (err) {
+      return await this.reply(senderJid, `❌ Gagal memicu backup: ${err.message}`);
+    }
+  }
+
   // =========================================================================
   // PROCESS COMMAND (MAIN DISPATCHER)
   // =========================================================================
@@ -963,14 +1048,27 @@ ${status}
     const cleanSender = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
     // 1. Perintah KUNCI manual / Lock
-    if (lower === 'lock' || lower === '!lock' || lower === 'kunci' || lower === '12' || lower === '!12' || lower === 'l') {
+    if (lower === 'lock' || lower === '!lock' || lower === 'kunci' || lower === 'l') {
       this.adminSessions.delete(cleanSender);
       this.userMenuState.delete(cleanSender);
       return await this.reply(senderJid, '🔒 *Sesi bot telah dikunci.* Masukkan PIN Anda untuk membuka kembali.');
     }
 
-    // 2. Perintah CLUSTER Global
-    if (lower === 'nodes' || lower === 'servers' || lower === 'cluster' || lower === '!nodes' || lower === '!cluster') {
+    // 2. Shortcut CLUSTER & BACKUP Global
+    if (lower === 'cluster' || lower === 'topologi' || lower === '!cluster' || lower === 'c') {
+      return await this.executeClusterStatus(senderJid);
+    }
+
+    if (lower === 'backup' || lower === 'backup status' || lower === '!backup' || lower === 'b') {
+      return await this.executeGdriveBackupStatus(senderJid);
+    }
+
+    if (lower === 'trigger backup' || lower === 'backup now' || lower === '!backup now') {
+      return await this.executeGdriveBackupTrigger(senderJid);
+    }
+
+    // 3. Perintah CLUSTER Global
+    if (lower === 'nodes' || lower === 'servers' || lower === '!nodes') {
       let out = `🖥️ *STATUS CLUSTER & FLEET SERVER*\n-----------------------------------------\n`;
       for (const [id, node] of cluster.nodes.entries()) {
         const icon = node.status === 'online' ? '🟢' : '🔴';
@@ -1219,6 +1317,21 @@ ${status}
     // 11. Inventori & Laporan Layanan / Aplikasi (Auto-Discovery)
     if (lower === '11' || lower === '!11' || lower === 'services' || lower === '!services' || lower === 'apps' || lower === '!apps' || lower === 'report' || lower === 'layanan' || lower === 'aplikasi') {
       return await this.showServerServicesMenu(senderJid, cleanSender, targetNodeId, targetNodeName);
+    }
+
+    // 12. Status Jaringan & Topologi Cluster
+    if (lower === '12' || lower === '!12' || lower === 'cluster' || lower === '!cluster') {
+      return await this.executeClusterStatus(senderJid);
+    }
+
+    // 13. Status Backup Server VPS ke Google Drive
+    if (lower === '13' || lower === '!13' || lower === 'backup' || lower === '!backup') {
+      return await this.executeGdriveBackupStatus(senderJid);
+    }
+
+    // 14. Jalankan Backup ke Google Drive Sekarang (Trigger Backup)
+    if (lower === '14' || lower === '!14' || lower === 'backup now' || lower === 'trigger backup') {
+      return await this.executeGdriveBackupTrigger(senderJid);
     }
 
     // Restart Layanan Tertentu

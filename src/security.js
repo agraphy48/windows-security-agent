@@ -725,6 +725,113 @@ EOF
     } catch (err) {
       return { error: err.message };
     }
+  },
+
+  /**
+   * Cek Status Backup Server VPS ke Google Drive
+   */
+  async getGdriveBackupStatus() {
+    if (isWindows) {
+      return {
+        isWindows: true,
+        success: true,
+        message: 'Layanan Backup Google Drive berjalan di Server VPS Linux (node-02). Perintah ini otomatis diarahkan ke node-02.'
+      };
+    }
+
+    try {
+      // 1. Cek apakah script backup sedang berjalan
+      let isRunning = false;
+      try {
+        const pgrepOut = await runBash('pgrep -f backup-to-gdrive.sh 2>/dev/null');
+        if (pgrepOut && pgrepOut.trim().length > 0) isRunning = true;
+      } catch {}
+
+      // 2. Baca 12 baris terakhir log backup
+      let lastLogs = 'Tidak ada log backup ditemukan.';
+      try {
+        const logOut = await runBash('tail -n 12 /var/log/backup-to-gdrive.log 2>/dev/null');
+        if (logOut && logOut.trim()) lastLogs = logOut.trim();
+      } catch {}
+
+      // 3. Cek file arsip lokal di /backup/
+      let localFiles = 'Tidak ada arsip lokal.';
+      try {
+        const lsOut = await runBash('ls -lh /backup/*.tar.gz 2>/dev/null | tail -n 5');
+        if (lsOut && lsOut.trim()) localFiles = lsOut.trim();
+      } catch {}
+
+      // 4. Cek remote Google Drive via rclone
+      let gdriveLatest = 'Tidak dapat membaca status remote Google Drive.';
+      let gdriveArchives = '';
+      try {
+        const rcloneLatest = await runBash('rclone lsf -l --format "pst" "gdrive:VPS_MIGRATION_BACKUP/latest/" 2>/dev/null');
+        if (rcloneLatest && rcloneLatest.trim()) gdriveLatest = rcloneLatest.trim();
+        const rcloneArch = await runBash('rclone lsf -l --format "pst" "gdrive:VPS_MIGRATION_BACKUP/archives/" 2>/dev/null | tail -n 4');
+        if (rcloneArch && rcloneArch.trim()) gdriveArchives = rcloneArch.trim();
+      } catch (e) {
+        gdriveLatest = `Gagal query rclone: ${e.message}`;
+      }
+
+      // 5. Cek jadwal Cron
+      let cronSchedule = '0 19 * * * (02:00 WIB Setiap Hari)';
+      try {
+        const cronOut = await runBash('crontab -l 2>/dev/null | grep -i "backup-to-gdrive"');
+        if (cronOut && cronOut.trim()) cronSchedule = cronOut.trim();
+      } catch {}
+
+      return {
+        success: true,
+        isRunning,
+        lastLogs,
+        localFiles,
+        gdriveLatest,
+        gdriveArchives,
+        cronSchedule,
+        timestamp: new Date().toISOString()
+      };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * Menjalankan (Trigger) Backup Server VPS ke Google Drive secara instan
+   */
+  async triggerGdriveBackup() {
+    if (isWindows) {
+      return {
+        success: false,
+        message: 'Layanan Backup Google Drive hanya tersedia di Server VPS Linux (node-02).'
+      };
+    }
+
+    try {
+      // Pastikan tidak sedang berjalan
+      const pgrepOut = await runBash('pgrep -f backup-to-gdrive.sh 2>/dev/null');
+      if (pgrepOut && pgrepOut.trim().length > 0) {
+        return {
+          success: false,
+          alreadyRunning: true,
+          message: '⚠️ Proses backup VPS ke Google Drive saat ini sedang berjalan! Mohon tunggu proses selesai.'
+        };
+      }
+
+      const fs = require('fs');
+      const scriptPath = '/root/backup-to-gdrive.sh';
+      if (!fs.existsSync(scriptPath)) {
+        return { success: false, message: `Script backup ${scriptPath} tidak ditemukan di server VPS.` };
+      }
+
+      await runBash('nohup /root/backup-to-gdrive.sh >> /var/log/backup-to-gdrive.log 2>&1 &');
+
+      return {
+        success: true,
+        message: '🚀 Perintah backup VPS ke Google Drive berhasil dipicu di latar belakang! Proses memakan waktu beberapa menit. Silakan pantau status backup secara berkala.'
+      };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
   }
 };
 

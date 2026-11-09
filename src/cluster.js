@@ -325,6 +325,15 @@ class ClusterManager {
         if (!/^[a-zA-Z0-9_\-@\.]+$/.test(name)) return { error: 'Nama service tidak valid' };
         return await security.restartService(name);
       }
+      if (command === 'cluster-status') {
+        return { success: true, report: this.getClusterStatusReport() };
+      }
+      if (command === 'backup-status') {
+        return await security.getGdriveBackupStatus();
+      }
+      if (command === 'backup-trigger') {
+        return await security.triggerGdriveBackup();
+      }
       return { error: `Perintah tidak dikenal: ${command}` };
     } catch (err) {
       return { error: err.message };
@@ -654,6 +663,74 @@ class ClusterManager {
     }
 
     return reports;
+  }
+
+  /**
+   * Menghasilkan Laporan Komprehensif Status Arsitektur Cluster Multi-Server
+   */
+  getClusterStatusReport() {
+    const list = [];
+    const seenIds = new Set();
+
+    // 1. Current host
+    list.push({
+      id: config.nodeId,
+      name: config.nodeName,
+      role: config.clusterRole,
+      status: 'online',
+      url: config.clusterUrl || 'Local Host',
+      latency: '0ms (Host Aktif)',
+      isCurrent: true
+    });
+    seenIds.add(config.nodeId);
+
+    // 2. Cluster nodes
+    for (const [id, node] of this.nodes.entries()) {
+      if (seenIds.has(id)) continue;
+      // Deduplikasi nama yang sama
+      if (list.some(n => n.name.toLowerCase() === node.name.toLowerCase())) continue;
+
+      seenIds.add(id);
+      list.push({
+        id: node.nodeId || id,
+        name: node.name,
+        role: node.role || 'worker',
+        status: node.status || 'unknown',
+        url: node.url || 'N/A',
+        latency: node.latency ? `${node.latency}ms` : (node.status === 'online' ? 'Terhubung' : 'Terputus'),
+        lastSeen: node.lastHeartbeat ? `${Math.round((Date.now() - node.lastHeartbeat) / 1000)}s lalu` : 'N/A'
+      });
+    }
+
+    const onlineCount = list.filter(n => n.status === 'online').length;
+    const nowWib = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+
+    let report = `🌐 *STATUS ARSITEKTUR & TOPOLOGI CLUSTER*\n`;
+    report += `-----------------------------------------\n`;
+    report += `• *Total Node Terdaftar:* ${list.length} Server (${onlineCount} Online)\n`;
+    report += `• *Server Master (Koordinator):* ${this.isMaster ? `${config.nodeName} (Node ini)` : (this.masterNodeId || 'node-02')}\n`;
+    report += `• *Waktu Pemantauan:* ${nowWib} WIB\n`;
+    report += `-----------------------------------------\n\n`;
+
+    list.forEach((n, idx) => {
+      const isOnline = n.status === 'online';
+      const icon = isOnline ? '🟢' : '🔴';
+      const roleBadge = n.role === 'master' ? '👑 [MASTER]' : (n.role === 'standby' ? '🛡️ [STANDBY-HA]' : '⚙️ [WORKER]');
+      
+      report += `${icon} *Node 0${idx + 1}: ${n.name}*\n`;
+      report += `   • ID: \`${n.id}\`\n`;
+      report += `   • Peran: *${roleBadge}*\n`;
+      report += `   • Status: *${n.status.toUpperCase()}*\n`;
+      report += `   • Jalur Jaringan: \`${n.url}\`\n`;
+      report += `   • Respons / Latensi: ${n.latency}\n`;
+      if (n.lastSeen) report += `   • Heartbeat Terakhir: ${n.lastSeen}\n`;
+      report += `\n`;
+    });
+
+    report += `-----------------------------------------\n`;
+    report += `💡 *Kesiapan Failover Otomatis:*\n`;
+    report += `• Jika Master (VPS) down, Standby (Windows) mendeteksi dalam ${config.failoverTimeoutSeconds} detik dan otomatis mengambil alih gateway WhatsApp & koordinasi.\n`;
+    return report;
   }
 
   /**

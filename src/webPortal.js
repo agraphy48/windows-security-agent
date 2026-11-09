@@ -4,6 +4,7 @@ const path = require('path');
 const contactsManager = require('./contacts');
 const config = require('./config');
 const cluster = require('./cluster');
+const mailer = require('./mailer');
 
 function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -368,7 +369,8 @@ class WebPortal {
 
     // 0.1 Proteksi Akses Langsung IP & Enforce Domain HTTPS
     const host = (req.headers.host || '').toLowerCase();
-    const isDirectIpAccess = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(host);
+    const isLoopback = host.startsWith('127.0.0.1') || host.startsWith('localhost') || host.startsWith('[::1]');
+    const isDirectIpAccess = !isLoopback && /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(host);
     if (isDirectIpAccess && (url === '/' || url === '/login' || url === '/dashboard' || url === '/qr')) {
       res.writeHead(301, { Location: `https://pentest.portal-egn.com${url}` });
       res.end();
@@ -734,22 +736,13 @@ Waktu Deteksi: ${new Date().toLocaleString('id-ID')}`
       this.failedLogins.delete(ip);
       this.userFailures.delete(username);
 
-      const is2FaRequired = (config.dashboard2Fa !== false) && waClient && waClient.isConnected;
+      const is2FaRequired = (config.dashboard2Fa !== false);
 
       if (is2FaRequired) {
         const otp = String(crypto.randomInt(100000, 999999));
         const twoFaToken = crypto.randomBytes(32).toString('hex');
-        
-        this.pending2Fa.set(twoFaToken, {
-          username,
-          otp,
-          expiresAt: now + (3 * 60 * 1000),
-          attempts: 0,
-          ip,
-          userAgent: req.headers['user-agent'] || 'unknown'
-        });
-
         const cleanUa = (req.headers['user-agent'] || 'Browser Web').substring(0, 60);
+
         const otpMessage = 
 `🔐 *KODE VERIFIKASI 2FA - SECOPS PORTAL* 🔐
 -----------------------------------------
@@ -764,20 +757,146 @@ Kode OTP Rahasia: *${otp}*
 ⚠️ *JANGAN PERNAH MEMBERIKAN KODE INI KEPADA SIAPA PUN!*
 Jika Anda tidak merasa melakukan login, kemungkinan password Anda bocor dan penyerang sedang tertahan di gerbang 2FA ini.`;
 
-        await waClient.broadcastToAdmins(otpMessage);
-        logAuthEvent('2FA_SENT', ip, username, 'WhatsApp 2FA OTP dispatched to admins');
+        const requestedChannel = String(body.channel || body.otpChannel || 'wa').trim().toLowerCase();
+        const targetChannel = (requestedChannel === 'email' || requestedChannel === 'wa') ? requestedChannel : 'wa';
 
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({
-          success: true,
-          require2FA: true,
-          twoFaToken,
-          message: 'Kredensial valid. Kode OTP 6-digit telah dikirimkan ke WhatsApp resmi Administrator.'
-        }));
+        if (targetChannel === 'email') {
+          let emailSent = false;
+          let mailError = null;
+          try {
+            await mailer.send2FaOtpEmail({
+              to: config.adminEmail || 'agraphylearn@gmail.com',
+              otp,
+              username,
+              ip,
+              userAgent: req.headers['user-agent']
+            });
+            emailSent = true;
+            logAuthEvent('2FA_SENT_EMAIL', ip, username, `Email 2FA OTP dispatched to ${config.adminEmail || 'agraphylearn@gmail.com'}`);
+          } catch (err) {
+            mailError = err.message;
+            logAuthEvent('2FA_EMAIL_FAILED', ip, username, `Failed to send email OTP: ${err.message}`);
+          }
+
+          if (emailSent) {
+            this.pending2Fa.set(twoFaToken, {
+              username,
+              otp,
+              channel: 'email',
+              expiresAt: now + (3 * 60 * 1000),
+              attempts: 0,
+              ip,
+              userAgent: req.headers['user-agent'] || 'unknown'
+            });
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({
+              success: true,
+              require2FA: true,
+              twoFaToken,
+              channel: 'email',
+              targetInfo: config.adminEmail || 'agraphylearn@gmail.com',
+              message: `Kredensial valid. Kode OTP 6-digit telah dikirimkan ke Email: ${config.adminEmail || 'agraphylearn@gmail.com'}`
+            }));
+          }
+
+          // Fallback to WhatsApp if available
+          if (waClient && waClient.isConnected) {
+            await waClient.broadcastToAdmins(otpMessage);
+            this.pending2Fa.set(twoFaToken, {
+              username,
+              otp,
+              channel: 'wa',
+              expiresAt: now + (3 * 60 * 1000),
+              attempts: 0,
+              ip,
+              userAgent: req.headers['user-agent'] || 'unknown'
+            });
+            logAuthEvent('2FA_SENT_FALLBACK_WA', ip, username, 'Email failed, fell back to WhatsApp');
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({
+              success: true,
+              require2FA: true,
+              twoFaToken,
+              channel: 'wa',
+              targetInfo: 'WhatsApp Administrator',
+              message: `Pengiriman email terkendala (${mailError}). Kode OTP otomatis dialihkan ke WhatsApp resmi Admin.`
+            }));
+          }
+
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            success: false,
+            error: `Gagal mengirimkan kode OTP ke Email: ${mailError}. Pastikan konfigurasi SMTP di file .env sudah diisi atau pilih WhatsApp.`
+          }));
+        }
+
+        // Default Channel: WhatsApp
+        if (waClient && waClient.isConnected) {
+          await waClient.broadcastToAdmins(otpMessage);
+          this.pending2Fa.set(twoFaToken, {
+            username,
+            otp,
+            channel: 'wa',
+            expiresAt: now + (3 * 60 * 1000),
+            attempts: 0,
+            ip,
+            userAgent: req.headers['user-agent'] || 'unknown'
+          });
+          logAuthEvent('2FA_SENT_WA', ip, username, 'WhatsApp 2FA OTP dispatched to admins');
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            success: true,
+            require2FA: true,
+            twoFaToken,
+            channel: 'wa',
+            targetInfo: 'WhatsApp Administrator',
+            message: 'Kredensial valid. Kode OTP 6-digit telah dikirimkan ke WhatsApp resmi Administrator.'
+          }));
+        }
+
+        // WhatsApp Offline -> Fallback to Email
+        try {
+          await mailer.send2FaOtpEmail({
+            to: config.adminEmail || 'agraphylearn@gmail.com',
+            otp,
+            username,
+            ip,
+            userAgent: req.headers['user-agent']
+          });
+          this.pending2Fa.set(twoFaToken, {
+            username,
+            otp,
+            channel: 'email',
+            expiresAt: now + (3 * 60 * 1000),
+            attempts: 0,
+            ip,
+            userAgent: req.headers['user-agent'] || 'unknown'
+          });
+          logAuthEvent('2FA_SENT_FALLBACK_EMAIL', ip, username, 'WhatsApp offline, fell back to Email');
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            success: true,
+            require2FA: true,
+            twoFaToken,
+            channel: 'email',
+            targetInfo: config.adminEmail || 'agraphylearn@gmail.com',
+            message: `Gateway WhatsApp sedang offline. Kode OTP otomatis dikirimkan ke Email: ${config.adminEmail || 'agraphylearn@gmail.com'}`
+          }));
+        } catch (mailErr) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            success: false,
+            error: `Gateway WhatsApp sedang offline dan pengiriman email gagal (${mailErr.message}).`
+          }));
+        }
       }
 
       this.createSession(username, req, res);
-      logAuthEvent('LOGIN_SUCCESS', ip, username, 'Direct login authenticated (2FA bypassed: WA offline)');
+      logAuthEvent('LOGIN_SUCCESS', ip, username, 'Direct login authenticated (2FA disabled)');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: true, require2FA: false, message: 'Login berhasil!' }));
 
@@ -908,8 +1027,8 @@ Sistem mencatat percobaan ini untuk blokir firewall Fail2ban.`
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
 
     const lastResend = this.lastOtpResend.get(ip) || 0;
-    if (now - lastResend < 45 * 1000) {
-      const waitSec = Math.ceil((45 * 1000 - (now - lastResend)) / 1000);
+    if (now - lastResend < 15 * 1000) {
+      const waitSec = Math.ceil((15 * 1000 - (now - lastResend)) / 1000);
       res.writeHead(429, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: false, error: `Mohon tunggu ${waitSec} detik sebelum meminta kode OTP baru.` }));
     }
@@ -929,19 +1048,55 @@ Sistem mencatat percobaan ini untuk blokir firewall Fail2ban.`
       return res.end(JSON.stringify({ success: false, error: 'Sesi OTP tidak valid. Silakan login kembali.' }));
     }
 
-    if (!waClient || !waClient.isConnected) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: false, error: 'Gateway WhatsApp sedang tidak terhubung.' }));
-    }
+    const reqChannel = String(body.channel || '').trim().toLowerCase();
+    const channel = (reqChannel === 'email' || reqChannel === 'wa') ? reqChannel : (pending.channel || 'wa');
 
     const newOtp = String(crypto.randomInt(100000, 999999));
-    pending.otp = newOtp;
-    pending.expiresAt = now + (3 * 60 * 1000);
-    pending.attempts = 0;
-    this.lastOtpResend.set(ip, now);
-
     const cleanUa = (req.headers['user-agent'] || 'Browser Web').substring(0, 60);
-    const otpMessage = 
+
+    if (channel === 'email') {
+      try {
+        await mailer.send2FaOtpEmail({
+          to: config.adminEmail || 'agraphylearn@gmail.com',
+          otp: newOtp,
+          username: pending.username,
+          ip,
+          userAgent: req.headers['user-agent']
+        });
+
+        pending.otp = newOtp;
+        pending.channel = 'email';
+        pending.expiresAt = now + (3 * 60 * 1000);
+        pending.attempts = 0;
+        this.lastOtpResend.set(ip, now);
+
+        logAuthEvent('2FA_RESENT_EMAIL', ip, pending.username, `New Email 2FA OTP re-dispatched to ${config.adminEmail || 'agraphylearn@gmail.com'}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          success: true,
+          channel: 'email',
+          targetInfo: config.adminEmail || 'agraphylearn@gmail.com',
+          message: `Kode OTP baru telah dikirimkan ke Email: ${config.adminEmail || 'agraphylearn@gmail.com'}`
+        }));
+      } catch (err) {
+        logAuthEvent('2FA_RESENT_EMAIL_ERROR', ip, pending.username, `Failed to resend email: ${err.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          success: false,
+          error: `Gagal mengirim email: ${err.message}. Silakan gunakan opsi WhatsApp.`
+        }));
+      }
+    } else {
+      // WhatsApp
+      if (!waClient || !waClient.isConnected) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          success: false,
+          error: 'Gateway WhatsApp sedang tidak terhubung. Silakan klik "Kirim via Email".'
+        }));
+      }
+
+      const otpMessage = 
 `🔐 *KODE VERIFIKASI 2FA BARU - SECOPS PORTAL* 🔐
 -----------------------------------------
 Kode OTP Baru: *${newOtp}*
@@ -953,11 +1108,23 @@ Kode OTP Baru: *${newOtp}*
 -----------------------------------------
 ⚠️ *JANGAN PERNAH MEMBERIKAN KODE INI KEPADA SIAPA PUN!*`;
 
-    await waClient.broadcastToAdmins(otpMessage);
-    logAuthEvent('2FA_RESENT', ip, pending.username, 'New WhatsApp 2FA OTP re-dispatched');
+      await waClient.broadcastToAdmins(otpMessage);
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ success: true, message: 'Kode OTP baru telah dikirimkan ke WhatsApp Admin.' }));
+      pending.otp = newOtp;
+      pending.channel = 'wa';
+      pending.expiresAt = now + (3 * 60 * 1000);
+      pending.attempts = 0;
+      this.lastOtpResend.set(ip, now);
+
+      logAuthEvent('2FA_RESENT_WA', ip, pending.username, 'New WhatsApp 2FA OTP re-dispatched');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: true,
+        channel: 'wa',
+        targetInfo: 'WhatsApp Administrator',
+        message: 'Kode OTP baru telah dikirimkan ke WhatsApp resmi Administrator.'
+      }));
+    }
   }
 
   handleApiLogout(req, res) {
@@ -1208,19 +1375,39 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
           <label for="password">Password / Security PIN</label>
           <input type="password" id="password" name="password" placeholder="Masukkan PIN / Password" required autocomplete="current-password">
         </div>
+
+        <!-- PILIHAN KANAL VERIFIKASI 2FA OTP -->
+        <div class="form-group" style="margin-top: 14px;">
+          <label style="font-size: 13px; font-weight: 600; color: #94a3b8; margin-bottom: 8px; display: block;">Metode Pengiriman OTP 2FA:</label>
+          <div style="display: flex; gap: 10px;">
+            <label style="flex: 1; display: flex; align-items: center; gap: 8px; background: rgba(30, 41, 59, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 10px; cursor: pointer; font-size: 13px; color: #f8fafc;">
+              <input type="radio" name="otpChannel" value="wa" checked style="accent-color: #22c55e;">
+              <span>📱 No. WhatsApp</span>
+            </label>
+            <label style="flex: 1; display: flex; align-items: center; gap: 8px; background: rgba(30, 41, 59, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 10px; cursor: pointer; font-size: 13px; color: #f8fafc;">
+              <input type="radio" name="otpChannel" value="email" style="accent-color: #38bdf8;">
+              <span>📧 Email Admin</span>
+            </label>
+          </div>
+          <small style="font-size: 11px; color: #64748b; margin-top: 6px; display: block;">Email tujuan: <code style="color: #38bdf8;">${escapeHtml(config.adminEmail || 'agraphylearn@gmail.com')}</code></small>
+        </div>
+
         <button type="submit" id="submitBtn1" class="btn">Lanjutkan Verifikasi ➜</button>
       </form>
     </div>
 
-    <!-- STEP 2: OTENTIKASI 2FA WHATSAPP OTP -->
+    <!-- STEP 2: OTENTIKASI 2FA OTP -->
     <div id="step2" class="step-box">
       <form id="otpForm">
         <div style="text-align: center; margin-bottom: 16px;">
-          <div style="font-size: 32px; margin-bottom: 6px;">📲</div>
-          <h3 style="font-size: 16px; font-weight: 700; color: #f8fafc;">Verifikasi 2FA WhatsApp</h3>
-          <p style="font-size: 12px; color: #94a3b8; margin-top: 4px;">
-            Kode OTP 6-digit rahasia telah dikirimkan ke WhatsApp resmi Administrator Server.
+          <div id="step2Icon" style="font-size: 32px; margin-bottom: 6px;">🔐</div>
+          <h3 id="step2Title" style="font-size: 16px; font-weight: 700; color: #f8fafc;">Verifikasi Otentikasi 2FA</h3>
+          <p id="step2Desc" style="font-size: 12px; color: #94a3b8; margin-top: 4px;">
+            Kode OTP 6-digit rahasia telah dikirimkan ke tujuan otentikasi Anda.
           </p>
+          <div id="otpDestinationBadge" style="display: inline-block; margin-top: 8px; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 6px; padding: 6px 12px; font-size: 12px; color: #38bdf8; font-weight: 600;">
+            Kanal: Memuat...
+          </div>
         </div>
 
         <div class="form-group">
@@ -1233,8 +1420,13 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         </div>
 
         <button type="submit" id="submitBtn2" class="btn">Verifikasi & Buka Dashboard 🛡️</button>
-        <button type="button" id="resendOtpBtn" class="btn btn-secondary">Kirim Ulang Kode OTP</button>
-        <button type="button" id="backToStep1Btn" class="btn btn-secondary" style="font-size: 12px; padding: 8px;">← Kembali ke Kredensial</button>
+
+        <div style="display: flex; gap: 8px; margin-top: 10px;">
+          <button type="button" id="resendWaBtn" class="btn btn-secondary" style="flex: 1; font-size: 12px; padding: 10px 4px;">📱 Kirim via WA</button>
+          <button type="button" id="resendEmailBtn" class="btn btn-secondary" style="flex: 1; font-size: 12px; padding: 10px 4px;">📧 Kirim via Email</button>
+        </div>
+
+        <button type="button" id="backToStep1Btn" class="btn btn-secondary" style="font-size: 12px; padding: 8px; margin-top: 8px;">← Kembali ke Kredensial</button>
       </form>
     </div>
 
@@ -1251,11 +1443,17 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
     const otpForm = document.getElementById('otpForm');
     const submitBtn1 = document.getElementById('submitBtn1');
     const submitBtn2 = document.getElementById('submitBtn2');
-    const resendOtpBtn = document.getElementById('resendOtpBtn');
+    const resendWaBtn = document.getElementById('resendWaBtn');
+    const resendEmailBtn = document.getElementById('resendEmailBtn');
+    const step2Icon = document.getElementById('step2Icon');
+    const step2Title = document.getElementById('step2Title');
+    const step2Desc = document.getElementById('step2Desc');
+    const otpDestinationBadge = document.getElementById('otpDestinationBadge');
     const backToStep1Btn = document.getElementById('backToStep1Btn');
     const timerCountdown = document.getElementById('timerCountdown');
 
     let currentTwoFaToken = '';
+    let currentChannel = 'wa';
     let otpExpiresAt = 0;
     let timerInterval = null;
 
@@ -1269,6 +1467,27 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
       alertBox.style.display = 'none';
     }
 
+    function setChannelUI(channel, targetInfo) {
+      currentChannel = channel;
+      if (channel === 'email') {
+        step2Icon.innerText = '📧';
+        step2Title.innerText = 'Verifikasi 2FA Email';
+        step2Desc.innerText = 'Kode OTP 6-digit telah dikirimkan ke Email Administrator.';
+        otpDestinationBadge.innerText = '📧 Kanal: Email (' + (targetInfo || 'agraphylearn@gmail.com') + ')';
+        otpDestinationBadge.style.color = '#38bdf8';
+        otpDestinationBadge.style.borderColor = 'rgba(56, 189, 248, 0.4)';
+        otpDestinationBadge.style.background = 'rgba(56, 189, 248, 0.1)';
+      } else {
+        step2Icon.innerText = '📲';
+        step2Title.innerText = 'Verifikasi 2FA WhatsApp';
+        step2Desc.innerText = 'Kode OTP 6-digit telah dikirimkan ke WhatsApp resmi Administrator.';
+        otpDestinationBadge.innerText = '📱 Kanal: WhatsApp Administrator';
+        otpDestinationBadge.style.color = '#22c55e';
+        otpDestinationBadge.style.borderColor = 'rgba(34, 197, 94, 0.4)';
+        otpDestinationBadge.style.background = 'rgba(34, 197, 94, 0.1)';
+      }
+    }
+
     function startOtpTimer(durationSeconds) {
       if (timerInterval) clearInterval(timerInterval);
       otpExpiresAt = Date.now() + (durationSeconds * 1000);
@@ -1279,7 +1498,7 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         updateTimerDisplay();
         if (remaining <= 0) {
           clearInterval(timerInterval);
-          showAlert('Kode OTP telah kedaluwarsa. Silakan klik "Kirim Ulang Kode OTP".', true);
+          showAlert('Kode OTP telah kedaluwarsa. Silakan klik tombol kirim ulang OTP pilihan Anda.', true);
         }
       }, 1000);
     }
@@ -1303,12 +1522,14 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
       const _sec_token = document.getElementById('secToken').value;
       const _hp_website = document.getElementById('hpWebsite').value;
       const _hp_sec_code = document.getElementById('hpSecCode').value;
+      const channelRadio = document.querySelector('input[name="otpChannel"]:checked');
+      const channel = channelRadio ? channelRadio.value : 'wa';
 
       try {
         const res = await fetch('/api/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password, _sec_token, _hp_website, _hp_sec_code })
+          body: JSON.stringify({ username, password, channel, _sec_token, _hp_website, _hp_sec_code })
         });
         const data = await res.json();
 
@@ -1316,9 +1537,10 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
           if (data.require2FA) {
             // Berhasil step 1 -> Pindah ke Step 2 (2FA OTP)
             currentTwoFaToken = data.twoFaToken;
+            setChannelUI(data.channel || channel, data.targetInfo);
             step1.classList.remove('step-active');
             step2.classList.add('step-active');
-            showAlert(data.message || 'Kode OTP 6-digit telah dikirimkan ke WhatsApp Anda.', false);
+            showAlert(data.message || 'Kode OTP 6-digit telah dikirimkan.', false);
             startOtpTimer(180); // 3 menit
             document.getElementById('otpCode').value = '';
             document.getElementById('otpCode').focus();
@@ -1377,22 +1599,25 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
       }
     });
 
-    // Kirim Ulang OTP
-    resendOtpBtn.addEventListener('click', async () => {
+    // Kirim Ulang OTP Multi-Channel (WhatsApp / Email)
+    async function resendOtp(channel) {
       hideAlert();
-      resendOtpBtn.disabled = true;
-      resendOtpBtn.innerText = 'Mengirim Ulang...';
+      const activeBtn = (channel === 'email') ? resendEmailBtn : resendWaBtn;
+      const originalText = activeBtn.innerText;
+      activeBtn.disabled = true;
+      activeBtn.innerText = 'Mengirim...';
 
       try {
         const res = await fetch('/api/login/resend-2fa', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ twoFaToken: currentTwoFaToken })
+          body: JSON.stringify({ twoFaToken: currentTwoFaToken, channel })
         });
         const data = await res.json();
 
         if (data.success) {
-          showAlert(data.message || 'Kode OTP baru telah dikirimkan ke WhatsApp Anda.', false);
+          setChannelUI(data.channel || channel, data.targetInfo);
+          showAlert(data.message || 'Kode OTP baru telah dikirimkan.', false);
           startOtpTimer(180);
         } else {
           showAlert(data.error || 'Gagal mengirim ulang OTP.');
@@ -1401,11 +1626,14 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
         showAlert('Error: ' + err.message);
       } finally {
         setTimeout(() => {
-          resendOtpBtn.disabled = false;
-          resendOtpBtn.innerText = 'Kirim Ulang Kode OTP';
-        }, 15000);
+          activeBtn.disabled = false;
+          activeBtn.innerText = originalText;
+        }, 12000);
       }
-    });
+    }
+
+    resendWaBtn.addEventListener('click', () => resendOtp('wa'));
+    resendEmailBtn.addEventListener('click', () => resendOtp('email'));
 
     // Kembali ke Step 1
     backToStep1Btn.addEventListener('click', () => {
