@@ -75,6 +75,21 @@ class WhatsAppClient {
       fs.mkdirSync(config.sessionDir, { recursive: true });
     }
 
+    // Auto-Heal Signal Ratchet Sessions: bersihkan session korup / desync (>5KB)
+    try {
+      const sessionFiles = fs.readdirSync(config.sessionDir).filter(f => f.startsWith('session-') && f.endsWith('.json'));
+      for (const f of sessionFiles) {
+        const fullPath = path.join(config.sessionDir, f);
+        const stats = fs.statSync(fullPath);
+        if (stats.size > 5120) {
+          console.warn(`[WA Ratchet Healer] Membersihkan session korup/desync (${stats.size} bytes): ${f}`);
+          fs.unlinkSync(fullPath);
+        }
+      }
+    } catch (e) {
+      console.error('[WA Ratchet Healer] Error saat sanitasi session:', e.message);
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`[WA] Menggunakan WA Web v${version.join('.')}, isLatest: ${isLatest}`);
@@ -382,8 +397,8 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
       const isSessionValid = lastAuth && (config.pinTimeoutMinutes > 0) && (Date.now() - lastAuth < config.pinTimeoutMinutes * 60 * 1000);
       const rawTrimmed = text.trim();
 
-      // Cek apakah user menulis "monitor + pin" atau "monitor pin" (secara harfiah kata "pin"):
-      if (/^(monitor|menu|status|help)\s*(\+)?\s*pin$/i.test(rawTrimmed)) {
+      // Cek apakah user menulis "monitor + pin", "monito + pin", "monit pin", dll (secara harfiah kata "pin"):
+      if (/^(monitor|monito|monit|menu|status|help)\s*(\+)?\s*(pin|kode)?$/i.test(rawTrimmed)) {
         if (isSessionValid) {
           return await this.showServerSelectionMenu(senderJid, cleanSender);
         } else {
@@ -421,12 +436,13 @@ Contoh: langsung kirim \`${config.securityPin}\` atau \`monitor ${config.securit
         }
       }
 
-      // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157", "monitor + 465157", "monitor+465157", "1 465157")
+      // Cek apakah perintah menyertakan PIN inline di akhir (misal: "monitor 465157", "monito + 465157", "monitor+465157", "1 465157")
       const pinPattern = new RegExp(`[\\s+:,-]+${config.securityPin}$`);
       if (pinPattern.test(rawTrimmed)) {
         this.failedPinAttempts.delete(cleanSender);
         this.adminSessions.set(cleanSender, Date.now());
-        const cmdWithoutPin = rawTrimmed.replace(pinPattern, '').trim();
+        let cmdWithoutPin = rawTrimmed.replace(pinPattern, '').trim();
+        if (/^(monito|monit)$/i.test(cmdWithoutPin)) cmdWithoutPin = 'monitor';
         console.log(`[🔑 Auth Inline] Nomor ${cleanSender} mengotorisasi perintah: "${cmdWithoutPin}"`);
         return await this.processCommand(senderJid, cmdWithoutPin || 'monitor');
       }
@@ -1138,11 +1154,16 @@ ${status}
     if (
       lower === 'monitor' ||
       lower === '!monitor' ||
+      lower === 'monito' ||
+      lower === '!monito' ||
+      lower === 'monit' ||
       lower === 'menu' ||
       lower === '!menu' ||
       lower === 'help' ||
       lower === '!help' ||
-      lower === 'pilih server'
+      lower === 'pilih server' ||
+      lower === 'server' ||
+      lower === 'servers'
     ) {
       return await this.showServerSelectionMenu(senderJid, cleanSender);
     }
@@ -1494,6 +1515,17 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
       await this.sock.sendMessage(jid, { text: text.trim() });
     } catch (err) {
       console.error(`[WA] Gagal membalas ke ${jid}:`, err.message);
+      // Auto-heal broken Signal ratchet sessions
+      if (err.message && (err.message.includes('SessionError') || err.message.includes('future') || err.message.includes('decrypt'))) {
+        try {
+          const cleanNum = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          const files = fs.readdirSync(config.sessionDir).filter(f => f.startsWith(`session-${cleanNum}`) && f.endsWith('.json'));
+          for (const f of files) {
+            fs.unlinkSync(path.join(config.sessionDir, f));
+            console.log(`[WA Auto-Heal] Membersihkan session desync untuk ${cleanNum}: ${f}`);
+          }
+        } catch {}
+      }
     }
   }
 
