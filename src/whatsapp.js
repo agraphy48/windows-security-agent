@@ -545,7 +545,19 @@ Atau sertakan di akhir perintah: \`monitor ${config.securityPin}\`
    * Langkah 1: Menampilkan Menu Pilihan Server
    */
   async showServerSelectionMenu(senderJid, cleanSender) {
-    const nodes = Array.from(cluster.nodes.values());
+    const rawNodes = Array.from(cluster.nodes.values());
+    const seenNames = new Set();
+    const nodes = [];
+
+    // Deduplikasi berdasarkan nama server
+    for (const n of rawNodes) {
+      const cleanName = (n.name || n.nodeId).trim();
+      if (!seenNames.has(cleanName)) {
+        seenNames.add(cleanName);
+        nodes.push(n);
+      }
+    }
+
     if (nodes.length === 0) {
       nodes.push({
         nodeId: config.nodeId,

@@ -168,11 +168,18 @@ class ClusterManager {
             workerUrl = `http://${clientIp}:${config.clusterPort}`;
           }
 
-          // Jika node yang mendaftar memiliki ID yang SAMA dengan Master atau sudah dipakai node lain yang beda URL:
+          // Cek apakah node ini adalah update URL/status dari node yang sudah terdaftar
           const isSameAsMaster = finalNodeId === config.nodeId;
-          const isConflictWithExisting = this.nodes.has(finalNodeId) && this.nodes.get(finalNodeId).url !== workerUrl;
+          const existing = this.nodes.get(finalNodeId);
+          const isSameNodeUpdating = existing && (existing.name === finalName || finalNodeId === data.nodeId);
 
-          if (isSameAsMaster || isConflictWithExisting) {
+          if (isSameNodeUpdating) {
+            existing.url = workerUrl;
+            existing.role = data.role || existing.role;
+            existing.status = 'online';
+            existing.lastSeen = Date.now();
+            console.log(`[🌐 Cluster] Node "${finalName}" (${finalNodeId}) memperbarui URL menjadi: ${workerUrl}`);
+          } else if (isSameAsMaster) {
             let nextIndex = 2;
             while (this.nodes.has(`node-0${nextIndex}`) || this.nodes.has(`node-${nextIndex}`)) {
               nextIndex++;
@@ -181,17 +188,33 @@ class ClusterManager {
             if (!data.name || data.name === config.nodeName || data.name === 'Server Utama' || data.name === 'Server VPS (AlmaLinux)') {
               finalName = `Server Node ${nextIndex}`;
             }
-            console.warn(`[⚠️ Cluster ID Duplikat] Node dari ${clientIp} menggunakan ID yang sama ('${data.nodeId}'). Dialokasikan otomatis menjadi ID unik: '${finalNodeId}', Nama: '${finalName}'`);
+            console.warn(`[⚠️ Cluster ID Duplikat] Node dari ${clientIp} menggunakan ID yang sama dengan Master. Dialokasikan menjadi ID: '${finalNodeId}', Nama: '${finalName}'`);
+            this.nodes.set(finalNodeId, {
+              nodeId: finalNodeId,
+              name: finalName,
+              role: data.role || 'worker',
+              url: workerUrl,
+              status: 'online',
+              lastSeen: Date.now()
+            });
+          } else {
+            this.nodes.set(finalNodeId, {
+              nodeId: finalNodeId,
+              name: finalName,
+              role: data.role || 'worker',
+              url: workerUrl,
+              status: 'online',
+              lastSeen: Date.now()
+            });
           }
 
-          this.nodes.set(finalNodeId, {
-            nodeId: finalNodeId,
-            name: finalName,
-            role: data.role || 'worker',
-            url: workerUrl,
-            status: 'online',
-            lastSeen: Date.now()
-          });
+          // Bersihkan entri duplikat dengan nama server yang sama jika ada
+          for (const [id, n] of this.nodes.entries()) {
+            if (id !== finalNodeId && n.name === finalName) {
+              console.log(`[🌐 Cluster] Menghapus entri duplikat "${n.name}" (${id}) karena telah diperbarui ke (${finalNodeId})`);
+              this.nodes.delete(id);
+            }
+          }
 
           console.log(`[🌐 Cluster] Node terdaftar: ${finalName} (${finalNodeId}) sebagai ${data.role || 'worker'} (URL: ${workerUrl})`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -326,7 +349,14 @@ class ClusterManager {
           const nodeId = res.nodeId || 'node-02';
           const name = res.name || 'Server Worker';
           const existing = this.nodes.get(nodeId);
-          if (!existing || existing.status !== 'online') {
+          if (existing) {
+            if (existing.url !== workerUrl) {
+              console.log(`[🌐 Cluster] Worker "${name}" (${nodeId}) beralih rute ke: ${workerUrl}`);
+            }
+            existing.url = workerUrl;
+            existing.status = 'online';
+            existing.lastSeen = Date.now();
+          } else {
             this.nodes.set(nodeId, {
               nodeId,
               name,
@@ -336,6 +366,14 @@ class ClusterManager {
               lastSeen: Date.now()
             });
             console.log(`[🌐 Cluster] Worker "${name}" (${nodeId}) berhasil terhubung & didaftarkan dari ${workerUrl}`);
+          }
+
+          // Bersihkan entri duplikat yang memiliki nama sama persis tapi beda ID
+          for (const [id, n] of this.nodes.entries()) {
+            if (id !== nodeId && n.name === name) {
+              console.log(`[🌐 Cluster] Menghapus duplikat "${n.name}" (${id}) setelah sinkronisasi ${nodeId}`);
+              this.nodes.delete(id);
+            }
           }
         }
       } catch (err) {
