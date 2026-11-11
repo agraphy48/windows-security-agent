@@ -1,4 +1,5 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const NodeCache = require('@cacheable/node-cache').default || require('@cacheable/node-cache');
 const pino = require('pino');
 const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
@@ -34,6 +35,162 @@ class WhatsAppClient {
     this.lastPairingCode = null;
     this.pairingExpiresAt = 0;
     this.pairingPhone = null;
+
+    // Cache untuk mencegah "Pesan Kosong" & perbaikan retry handshake Baileys
+    this.messageCache = new Map(); // keyId -> WAMessage
+    this.msgRetryCounterCache = new NodeCache({ stdTTL: 3600, useClones: false });
+    this.ratchetHealerInterval = null;
+    this.setupErrorInterceptor();
+  }
+
+  /**
+   * Menyimpan pesan ke cache in-memory untuk melayani getMessage (retry request)
+   */
+  storeMessage(keyId, message) {
+    if (!keyId || !message) return;
+    if (this.messageCache.size >= 1000) {
+      const firstKey = this.messageCache.keys().next().value;
+      this.messageCache.delete(firstKey);
+    }
+    this.messageCache.set(keyId, message);
+  }
+
+  /**
+   * Menormalkan JID (LID vs Phone Number) agar pengiriman pesan tidak berujung phantom / blank bubble
+   */
+  normalizeJid(jid) {
+    if (!jid) return '';
+    if (typeof jid !== 'string') jid = String(jid);
+    if (jid.includes('@')) {
+      const [numPart, domain] = jid.split('@');
+      const clean = numPart.split(':')[0].replace(/[^0-9]/g, '');
+      if (domain === 's.whatsapp.net' && clean.length >= 15) {
+        return `${clean}@lid`;
+      }
+      return `${clean}@${domain}`;
+    }
+    const clean = jid.replace(/[^0-9]/g, '');
+    if (clean.length >= 15) {
+      return `${clean}@lid`;
+    }
+    return `${clean}@s.whatsapp.net`;
+  }
+
+  /**
+   * Interseptor otomatis untuk menangkap error Signal Ratchet "Over 2000 messages" dan Bad MAC
+   */
+  setupErrorInterceptor() {
+    if (this._errorInterceptorInstalled) return;
+    this._errorInterceptorInstalled = true;
+
+    const originalConsoleError = console.error;
+    console.error = (...args) => {
+      try {
+        const text = args.map(a => (a && a.stack) ? `${a.message} ${a.stack}` : String(a)).join(' ');
+        if (text.includes('SessionError') || text.includes('Over 2000 messages') || text.includes('Bad MAC')) {
+          const match = text.match(/(\d{8,20})\.(\d+)/);
+          if (match) {
+            const brokenId = match[1];
+            const deviceId = match[2];
+            this.purgeBrokenSession(brokenId, deviceId);
+          } else {
+            this.healRatchetSessions();
+          }
+        }
+      } catch {}
+      originalConsoleError.apply(console, args);
+    };
+  }
+
+  /**
+   * Memusnahkan sesi ratchet yang korup secara instan saat terdeteksi error
+   */
+  purgeBrokenSession(brokenId, deviceId = null) {
+    try {
+      if (!fs.existsSync(config.sessionDir)) return;
+      const clean = String(brokenId).replace(/[^0-9]/g, '');
+      if (!clean) return;
+
+      const pattern = deviceId !== null ? `session-${clean}.${deviceId}.json` : `session-${clean}`;
+      const files = fs.readdirSync(config.sessionDir).filter(f => 
+        (deviceId !== null ? f === pattern : f.startsWith(pattern)) && f.endsWith('.json')
+      );
+
+      for (const f of files) {
+        try {
+          fs.unlinkSync(path.join(config.sessionDir, f));
+          console.warn(`[🛡️ Auto-Ratchet Rescue] Memusnahkan sesi desync ${f}. Baileys akan otomatis handshake ulang tanpa pesan kosong.`);
+        } catch {}
+      }
+    } catch (e) {
+      console.error('[Auto-Ratchet Rescue] Error:', e.message);
+    }
+  }
+
+  /**
+   * Sanitasi berkala sesi ratchet (memangkas closed sessions lama dan membersihkan session bengkak)
+   */
+  healRatchetSessions() {
+    try {
+      if (!fs.existsSync(config.sessionDir)) return;
+      const files = fs.readdirSync(config.sessionDir).filter(f => f.startsWith('session-') && f.endsWith('.json'));
+
+      let botLid = null;
+      try {
+        const credsPath = path.join(config.sessionDir, 'creds.json');
+        if (fs.existsSync(credsPath)) {
+          const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+          if (creds.me && creds.me.lid) {
+            botLid = creds.me.lid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          }
+        }
+      } catch {}
+
+      for (const f of files) {
+        const fullPath = path.join(config.sessionDir, f);
+        try {
+          const stats = fs.statSync(fullPath);
+
+          // Jika session companion bot sendiri dan membengkak > 1500 bytes, bersihkan
+          if (botLid && f.startsWith(`session-${botLid}.`)) {
+            if (stats.size > 1500) {
+              console.warn(`[WA Ratchet Healer] Membersihkan companion session bot (${stats.size} bytes): ${f}`);
+              fs.unlinkSync(fullPath);
+              continue;
+            }
+          }
+
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const data = JSON.parse(content);
+          if (data && data._sessions) {
+            const activeSessions = {};
+            let hasClosed = false;
+            for (const [key, sess] of Object.entries(data._sessions)) {
+              if (sess.indexInfo && sess.indexInfo.closed === -1) {
+                activeSessions[key] = sess;
+              } else {
+                hasClosed = true;
+              }
+            }
+
+            if (Object.keys(activeSessions).length > 0) {
+              if (hasClosed) {
+                data._sessions = activeSessions;
+                fs.writeFileSync(fullPath, JSON.stringify(data));
+                console.log(`[WA Ratchet Healer] Memangkas sesi usang pada ${f}, tersisa ${Object.keys(activeSessions).length} sesi aktif.`);
+              }
+            } else if (stats.size > 2500) {
+              console.warn(`[WA Ratchet Healer] Menghapus session desync (${stats.size} bytes): ${f}`);
+              fs.unlinkSync(fullPath);
+            }
+          }
+        } catch {
+          try { fs.unlinkSync(fullPath); } catch {}
+        }
+      }
+    } catch (e) {
+      console.error('[WA Ratchet Healer] Error saat sanitasi session:', e.message);
+    }
   }
 
   async start() {
@@ -75,19 +232,10 @@ class WhatsAppClient {
       fs.mkdirSync(config.sessionDir, { recursive: true });
     }
 
-    // Auto-Heal Signal Ratchet Sessions: bersihkan session korup / desync (>5KB)
-    try {
-      const sessionFiles = fs.readdirSync(config.sessionDir).filter(f => f.startsWith('session-') && f.endsWith('.json'));
-      for (const f of sessionFiles) {
-        const fullPath = path.join(config.sessionDir, f);
-        const stats = fs.statSync(fullPath);
-        if (stats.size > 5120) {
-          console.warn(`[WA Ratchet Healer] Membersihkan session korup/desync (${stats.size} bytes): ${f}`);
-          fs.unlinkSync(fullPath);
-        }
-      }
-    } catch (e) {
-      console.error('[WA Ratchet Healer] Error saat sanitasi session:', e.message);
+    // Jalankan sanitasi sesi awal dan aktifkan pemantauan berkala setiap 5 menit
+    this.healRatchetSessions();
+    if (!this.ratchetHealerInterval) {
+      this.ratchetHealerInterval = setInterval(() => this.healRatchetSessions(), 5 * 60 * 1000).unref();
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
@@ -100,7 +248,14 @@ class WhatsAppClient {
       printQRInTerminal: false,
       auth: state,
       browser: ['Server Security Agent', 'Chrome', '1.0.0'],
-      generateHighQualityLinkPreview: false
+      generateHighQualityLinkPreview: false,
+      msgRetryCounterCache: this.msgRetryCounterCache,
+      getMessage: async (key) => {
+        if (!key || !key.id) return undefined;
+        const cached = this.messageCache.get(key.id);
+        if (cached) return cached;
+        return undefined;
+      }
     });
 
     this.sock.ev.on('creds.update', saveCreds);
@@ -152,6 +307,9 @@ class WhatsAppClient {
     this.sock.ev.on('messages.upsert', async (m) => {
       if (m.type !== 'notify') return;
       for (const msg of m.messages) {
+        if (msg.key && msg.key.id && msg.message) {
+          this.storeMessage(msg.key.id, msg.message);
+        }
         if (!msg.message || msg.key.fromMe) continue;
         await this.handleIncomingMessage(msg);
       }
@@ -368,11 +526,20 @@ Ada nomor tidak dikenal mencoba menghubungi bot server Anda!
 • *Status:* 🛡️ Akses diblokir otomatis. Pesan tidak dibalas.
 -----------------------------------------`;
 
+            const sentAdmins = new Set();
             for (const adminNum of config.adminNumbers) {
-              try {
-                await this.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
-              } catch (err) {
-                console.error('Gagal kirim alert penyusup:', err.message);
+              const clean = adminNum.replace(/[^0-9]/g, '');
+              if (clean && clean !== cleanSender && !sentAdmins.has(clean)) {
+                sentAdmins.add(clean);
+                try {
+                  const jid = this.normalizeJid(clean);
+                  const sent = await this.sock.sendMessage(jid, { text: alertMsg });
+                  if (sent?.key?.id && sent?.message) {
+                    this.storeMessage(sent.key.id, sent.message);
+                  }
+                } catch (err) {
+                  console.error('Gagal kirim alert penyusup:', err.message);
+                }
               }
             }
           }
@@ -467,10 +634,17 @@ Terdeteksi percobaan pembobolan PIN bot WhatsApp server!
 • *Tindakan Otomatis:* 🛡️ Nomor dibekukan dari sistem selama 15 menit.
 -----------------------------------------`;
 
+            const sentAdmins = new Set();
             for (const adminNum of config.adminNumbers) {
-              if (adminNum !== cleanSender) {
+              const clean = adminNum.replace(/[^0-9]/g, '');
+              if (clean && clean !== cleanSender && !sentAdmins.has(clean)) {
+                sentAdmins.add(clean);
                 try {
-                  await this.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
+                  const jid = this.normalizeJid(clean);
+                  const sent = await this.sock.sendMessage(jid, { text: alertMsg });
+                  if (sent?.key?.id && sent?.message) {
+                    this.storeMessage(sent.key.id, sent.message);
+                  }
                 } catch (e) {}
               }
             }
@@ -1512,18 +1686,18 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
         console.warn(`[WA] Mencoba membalas ke ${jid} dengan pesan kosong, dibatalkan.`);
         return;
       }
-      await this.sock.sendMessage(jid, { text: text.trim() });
+      const targetJid = this.normalizeJid(jid);
+      const sent = await this.sock.sendMessage(targetJid, { text: text.trim() });
+      if (sent?.key?.id && sent?.message) {
+        this.storeMessage(sent.key.id, sent.message);
+      }
     } catch (err) {
       console.error(`[WA] Gagal membalas ke ${jid}:`, err.message);
       // Auto-heal broken Signal ratchet sessions
-      if (err.message && (err.message.includes('SessionError') || err.message.includes('future') || err.message.includes('decrypt'))) {
+      if (err.message && (err.message.includes('SessionError') || err.message.includes('future') || err.message.includes('decrypt') || err.message.includes('Bad MAC'))) {
         try {
           const cleanNum = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-          const files = fs.readdirSync(config.sessionDir).filter(f => f.startsWith(`session-${cleanNum}`) && f.endsWith('.json'));
-          for (const f of files) {
-            fs.unlinkSync(path.join(config.sessionDir, f));
-            console.log(`[WA Auto-Heal] Membersihkan session desync untuk ${cleanNum}: ${f}`);
-          }
+          this.purgeBrokenSession(cleanNum);
         } catch {}
       }
     }
@@ -1542,10 +1716,17 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
       return;
     }
     const recipients = contactsManager.getActiveNumbers(category);
+    const sentNumbers = new Set();
     for (const number of recipients) {
+      const clean = String(number).replace(/[^0-9]/g, '');
+      if (sentNumbers.has(clean)) continue;
+      sentNumbers.add(clean);
       try {
-        const jid = `${number}@s.whatsapp.net`;
-        await this.sock.sendMessage(jid, { text: message.trim() });
+        const jid = this.normalizeJid(number);
+        const sent = await this.sock.sendMessage(jid, { text: message.trim() });
+        if (sent?.key?.id && sent?.message) {
+          this.storeMessage(sent.key.id, sent.message);
+        }
         contactsManager.updateLastAlert(number);
       } catch (err) {
         console.error(`[WA Broadcast] Gagal kirim notif ke ${number}:`, err.message);

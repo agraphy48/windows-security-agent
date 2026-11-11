@@ -1211,8 +1211,11 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
     }
 
     try {
-      const jid = `${contact.number}@s.whatsapp.net`;
-      await waClient.sock.sendMessage(jid, { text: cleanMessage });
+      const jid = waClient.normalizeJid ? waClient.normalizeJid(contact.number) : `${contact.number}@s.whatsapp.net`;
+      const sent = await waClient.sock.sendMessage(jid, { text: cleanMessage });
+      if (waClient.storeMessage && sent?.key?.id && sent?.message) {
+        waClient.storeMessage(sent.key.id, sent.message);
+      }
       contactsManager.updateLastAlert(contact.number);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: true, message: `Pesan uji coba berhasil dikirim ke ${contact.name} (${contact.number})!` }));
@@ -1314,10 +1317,19 @@ Waktu Uji: ${new Date().toLocaleString('id-ID')}`;
 -----------------------------------------
 _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
 
+      const sentAdmins = new Set();
       for (const adminNum of config.adminNumbers) {
-        try {
-          await waClient.sock.sendMessage(`${adminNum}@s.whatsapp.net`, { text: alertMsg });
-        } catch (e) {}
+        const clean = adminNum.replace(/[^0-9]/g, '');
+        if (clean && !sentAdmins.has(clean)) {
+          sentAdmins.add(clean);
+          try {
+            const jid = waClient.normalizeJid ? waClient.normalizeJid(clean) : `${clean}@s.whatsapp.net`;
+            const sent = await waClient.sock.sendMessage(jid, { text: alertMsg });
+            if (waClient.storeMessage && sent?.key?.id && sent?.message) {
+              waClient.storeMessage(sent.key.id, sent.message);
+            }
+          } catch (e) {}
+        }
       }
     }
 
