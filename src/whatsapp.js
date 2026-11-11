@@ -773,6 +773,7 @@ Atau sertakan di akhir perintah: \`monitor 123456\`
 
     msg += `-----------------------------------------\n`;
     msg += `🌐 *C.* Status Arsitektur Cluster & Jaringan (Semua Node)\n`;
+    msg += `🔄 *D.* Replikasi Database VPS -> Local (Status & Sync)\n`;
     msg += `☁️ *B.* Status Backup Server VPS ke Google Drive\n`;
     msg += `📊 *A.* Laporan Status Seluruh Server (All Status)\n`;
     msg += `📋 *S.* Laporan Seluruh Layanan & Aplikasi (All Services)\n`;
@@ -831,6 +832,8 @@ Silakan balas dengan *NOMOR* tindakan:
 *12.* 🌐 Status Jaringan & Topologi Cluster
 *13.* ☁️ Status Backup Server VPS ke Google Drive
 *14.* 🚀 Jalankan Backup ke Google Drive Sekarang (Trigger Backup)
+*15.* 🔄 Status Sinkronisasi Database VPS ke Local (Hyper-V)
+*16.* ⚡ Mulai Sinkronisasi Database ke Local Sekarang (Trigger Sync)
 -----------------------------------------
 *0.* 🔙 Ganti / Pilih Server Lain
 *L.* 🔒 Kunci Sesi Bot
@@ -1228,6 +1231,70 @@ ${status}
     }
   }
 
+  async executeDatabaseSyncStatus(senderJid) {
+    await this.reply(senderJid, `⏳ Mengambil status replikasi database dari Master VPS (node-02)...`);
+    try {
+      let res;
+      if (config.nodeId === 'node-02' || !cluster.nodes.has('node-02')) {
+        res = await security.getDatabaseSyncStatus();
+      } else {
+        res = await cluster.dispatchCommand('node-02', 'sync-db-status');
+      }
+
+      if (!res || res.error) {
+        return await this.reply(senderJid, `❌ Gagal mengambil status sinkronisasi: ${res?.error || 'Tidak ada respons dari node-02'}\n\n💡 Ketik *0* untuk kembali.`);
+      }
+
+      const isRunning = res.isRunning;
+      const statusIcon = isRunning ? '🔄 SEDANG BERJALAN' : '✅ STANDBY / TERJADWAL';
+      const nowWib = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+
+      let out = `🔄 *STATUS REPLIKASI DATABASE MASTER KE LOCAL (HYPER-V)*\n`;
+      out += `-----------------------------------------\n`;
+      out += `• Status Engine: *${statusIcon}*\n`;
+      out += `• Jadwal Otomatis Cron: *${res.cronSchedule || 'Setiap 6 Jam (0 */6 * * *)'}*\n`;
+      out += `• Target Replikasi: *node-local (Hyper-V 100.110.122.22)*\n`;
+      out += `• Waktu Pengecekan: ${nowWib} WIB\n`;
+      out += `-----------------------------------------\n\n`;
+
+      out += `📋 *Log Sinkronisasi Terakhir (/var/log/cluster-db-sync.log):*\n`;
+      out += `\`\`\`\n${res.lastLogs || 'Tidak ada log sinkronisasi'}\n\`\`\`\n`;
+      out += `-----------------------------------------\n`;
+      out += `💡 Ketik *16* atau *sync now* untuk menjalankan sinkronisasi sekarang.\n`;
+      out += `💡 Ketik *0* untuk kembali ke menu server.`;
+
+      return await this.reply(senderJid, out);
+    } catch (err) {
+      return await this.reply(senderJid, `❌ Terjadi kesalahan saat memeriksa sinkronisasi: ${err.message}\n\n💡 Ketik *0* untuk kembali.`);
+    }
+  }
+
+  async executeDatabaseSyncTrigger(senderJid) {
+    await this.reply(senderJid, `⏳ Memeriksa dan memicu proses replikasi database ke server local...`);
+    try {
+      let res;
+      if (config.nodeId === 'node-02' || !cluster.nodes.has('node-02')) {
+        res = await security.triggerDatabaseSync();
+      } else {
+        res = await cluster.dispatchCommand('node-02', 'sync-db-trigger');
+      }
+
+      if (res && res.success) {
+        return await this.reply(
+          senderJid,
+          `🚀 *PERINTAH SINKRONISASI DATABASE DIPICU!*\n\n${res.message}\n\n💡 Ketik *15* atau *sync db* dalam 1-2 menit untuk melihat log hasil transfer.`
+        );
+      } else {
+        return await this.reply(
+          senderJid,
+          `⚠️ *GAGAL MEMULAI SINKRONISASI*\n\n${res?.message || res?.error || 'Tidak ada respons dari server VPS'}\n\n💡 Ketik *15* untuk melihat status saat ini.`
+        );
+      }
+    } catch (err) {
+      return await this.reply(senderJid, `❌ Gagal memicu sinkronisasi: ${err.message}`);
+    }
+  }
+
   // =========================================================================
   // PROCESS COMMAND (MAIN DISPATCHER)
   // =========================================================================
@@ -1255,6 +1322,14 @@ ${status}
 
     if (lower === 'trigger backup' || lower === 'backup now' || lower === '!backup now') {
       return await this.executeGdriveBackupTrigger(senderJid);
+    }
+
+    if (lower === 'sync' || lower === 'sync db' || lower === 'sync-db' || lower === 'sinkron db' || lower === '!sync db' || lower === 'd') {
+      return await this.executeDatabaseSyncStatus(senderJid);
+    }
+
+    if (lower === 'sync now' || lower === 'trigger sync' || lower === '!sync now') {
+      return await this.executeDatabaseSyncTrigger(senderJid);
     }
 
     // 3. Perintah CLUSTER Global
@@ -1527,6 +1602,16 @@ ${status}
     // 14. Jalankan Backup ke Google Drive Sekarang (Trigger Backup)
     if (lower === '14' || lower === '!14' || lower === 'backup now' || lower === 'trigger backup') {
       return await this.executeGdriveBackupTrigger(senderJid);
+    }
+
+    // 15. Status Sinkronisasi Database Cluster VPS ke Local
+    if (lower === '15' || lower === '!15' || lower === 'sync db' || lower === '!sync db') {
+      return await this.executeDatabaseSyncStatus(senderJid);
+    }
+
+    // 16. Jalankan Sinkronisasi Database Cluster VPS ke Local Sekarang (Trigger Sync)
+    if (lower === '16' || lower === '!16' || lower === 'sync now' || lower === '!sync now') {
+      return await this.executeDatabaseSyncTrigger(senderJid);
     }
 
     // Restart Layanan Tertentu

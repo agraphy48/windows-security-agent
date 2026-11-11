@@ -334,6 +334,12 @@ class ClusterManager {
       if (command === 'backup-trigger') {
         return await security.triggerGdriveBackup();
       }
+      if (command === 'sync-db-status') {
+        return await security.getDatabaseSyncStatus();
+      }
+      if (command === 'sync-db-trigger') {
+        return await security.triggerDatabaseSync();
+      }
       if (command === 'sync-pin') {
         const pin = String(params.pin || '').trim();
         if (!/^[0-9]{4,8}$/.test(pin)) return { error: 'Format PIN tidak valid (harus 4-8 digit angka)' };

@@ -832,6 +832,85 @@ EOF
     } catch (err) {
       return { success: false, error: err.message };
     }
+  },
+
+  /**
+   * Cek Status Replikasi & Sinkronisasi Database Cluster VPS ke Local Hyper-V
+   */
+  async getDatabaseSyncStatus() {
+    if (isWindows) {
+      return {
+        isWindows: true,
+        success: true,
+        message: 'Layanan Replikasi Database Master dijalankan dari Server VPS Linux (node-02) ke Hyper-V Worker (node-03).'
+      };
+    }
+
+    try {
+      // 1. Cek apakah script sinkronisasi sedang berjalan
+      let isRunning = false;
+      try {
+        const pgrepOut = await runBash('pgrep -f sync-databases-to-local.sh 2>/dev/null');
+        if (pgrepOut && pgrepOut.trim().length > 0) isRunning = true;
+      } catch {}
+
+      // 2. Baca 20 baris terakhir log sinkronisasi
+      let lastLogs = 'Tidak ada log sinkronisasi database ditemukan.';
+      try {
+        const logOut = await runBash('tail -n 20 /var/log/cluster-db-sync.log 2>/dev/null');
+        if (logOut && logOut.trim()) lastLogs = logOut.trim();
+      } catch {}
+
+      // 3. Jadwal cron
+      const cronSchedule = 'Setiap 6 Jam (0 */6 * * *)';
+
+      return {
+        success: true,
+        isRunning,
+        cronSchedule,
+        lastLogs
+      };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  /**
+   * Menjalankan (Trigger) Sinkronisasi Database Cluster VPS ke Local secara instan
+   */
+  async triggerDatabaseSync() {
+    if (isWindows) {
+      return {
+        success: false,
+        message: 'Layanan Replikasi Database Master hanya dapat dipicu dari Server VPS Linux (node-02).'
+      };
+    }
+
+    try {
+      const pgrepOut = await runBash('pgrep -f sync-databases-to-local.sh 2>/dev/null');
+      if (pgrepOut && pgrepOut.trim().length > 0) {
+        return {
+          success: false,
+          alreadyRunning: true,
+          message: '⚠️ Proses sinkronisasi database saat ini sedang berjalan! Mohon tunggu proses selesai.'
+        };
+      }
+
+      const fs = require('fs');
+      const scriptPath = '/root/sync-databases-to-local.sh';
+      if (!fs.existsSync(scriptPath)) {
+        return { success: false, message: `Script sinkronisasi ${scriptPath} tidak ditemukan di server VPS.` };
+      }
+
+      await runBash('nohup /root/sync-databases-to-local.sh > /dev/null 2>&1 &');
+
+      return {
+        success: true,
+        message: '🚀 Replikasi database cluster ke server local (Hyper-V node-03) berhasil dipicu di latar belakang! Semua 14 database sedang disinkronkan secara aman via Tailscale.'
+      };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
   }
 };
 
