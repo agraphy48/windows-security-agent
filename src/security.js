@@ -743,7 +743,7 @@ EOF
       // 1. Cek apakah script backup sedang berjalan
       let isRunning = false;
       try {
-        const pgrepOut = await runBash('pgrep -f backup-to-gdrive.sh 2>/dev/null');
+        const pgrepOut = await runBash('pgrep -f "\\[b\\]ackup-to-gdrive.sh" 2>/dev/null');
         if (pgrepOut && pgrepOut.trim().length > 0) isRunning = true;
       } catch {}
 
@@ -808,7 +808,7 @@ EOF
 
     try {
       // Pastikan tidak sedang berjalan
-      const pgrepOut = await runBash('pgrep -f backup-to-gdrive.sh 2>/dev/null');
+      const pgrepOut = await runBash('pgrep -f "\\[b\\]ackup-to-gdrive.sh" 2>/dev/null');
       if (pgrepOut && pgrepOut.trim().length > 0) {
         return {
           success: false,
@@ -850,7 +850,7 @@ EOF
       // 1. Cek apakah script sinkronisasi sedang berjalan
       let isRunning = false;
       try {
-        const pgrepOut = await runBash('pgrep -f sync-databases-to-local.sh 2>/dev/null');
+        const pgrepOut = await runBash('pgrep -f "\\[s\\]ync-databases-to-local.sh" 2>/dev/null');
         if (pgrepOut && pgrepOut.trim().length > 0) isRunning = true;
       } catch {}
 
@@ -887,7 +887,7 @@ EOF
     }
 
     try {
-      const pgrepOut = await runBash('pgrep -f sync-databases-to-local.sh 2>/dev/null');
+      const pgrepOut = await runBash('pgrep -f "\\[s\\]ync-databases-to-local.sh" 2>/dev/null');
       if (pgrepOut && pgrepOut.trim().length > 0) {
         return {
           success: false,
