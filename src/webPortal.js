@@ -1931,12 +1931,12 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
       const filtered = appsData.filter(app => {
         if (activeCategory === 'pinned' && !app.pinned) return false;
         if (activeCategory === 'saas' && !app.category.includes('Kasir') && !app.category.includes('SaaS') && !app.category.includes('Belanja')) return false;
-        if (activeCategory === 'admin' && !app.category.includes('Administrasi') && !app.category.includes('Pemerintahan')) return false;
-        if (activeCategory === 'edu' && !app.category.includes('CBT') && !app.category.includes('Pendidikan') && !app.category.includes('Sekolah')) return false;
-        if (activeCategory === 'finance' && !app.category.includes('Keuangan') && !app.category.includes('Pajak')) return false;
+        if (activeCategory === 'admin' && !app.category.includes('Administrasi') && !app.category.includes('Pemerintahan') && !app.category.includes('Kepolisian')) return false;
+        if (activeCategory === 'edu' && !app.category.includes('CBT') && !app.category.includes('Edukasi') && !app.category.includes('Pendidikan') && !app.category.includes('Sekolah') && !app.category.includes('Bimbel')) return false;
+        if (activeCategory === 'finance' && !app.category.includes('Keuangan') && !app.category.includes('Pajak') && !app.category.includes('Akuntansi') && !app.category.includes('Perpajakan')) return false;
         if (activeCategory === 'infra' && !app.category.includes('Infrastruktur')) return false;
-        if (activeCategory === 'ai' && !app.category.includes('AI') && !app.category.includes('API') && !app.category.includes('Developer')) return false;
-        if (activeCategory === 'media' && !app.category.includes('Media') && !app.category.includes('Publikasi') && !app.category.includes('Jurnal')) return false;
+        if (activeCategory === 'ai' && !app.category.includes('AI') && !app.category.includes('API') && !app.category.includes('Developer') && !app.category.includes('RAG')) return false;
+        if (activeCategory === 'media' && !app.category.includes('Media') && !app.category.includes('Publikasi') && !app.category.includes('Jurnal') && !app.category.includes('Otomotif') && !app.category.includes('Bisnis') && !app.category.includes('Korporat')) return false;
 
         if (q) {
           const matchTitle = (app.title || '').toLowerCase().includes(q);

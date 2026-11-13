@@ -294,3 +294,4 @@ const initialApps = [
 
 fs.writeFileSync(appsDataPath, JSON.stringify(initialApps, null, 2), 'utf8');
 console.log(`[OK] Saved initial ${initialApps.length} portal applications to ${appsDataPath}`);
+

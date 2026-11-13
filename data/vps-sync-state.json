@@ -1,6 +1,5 @@
 {
   "knownVhosts": [
-    "agus.exprogionusantara.my.id",
     "agus.portal-egn.com",
     "alma-cyberpanel.localhost",
     "api.portal-egn.com",
@@ -11,20 +10,14 @@
     "chat.portal-egn.com",
     "edukasi.portal-egn.com",
     "Example",
-    "exprogionusantara.cloud",
-    "exprogionusantara.my.id",
     "jasapajakpolsri.com",
     "jlpp.exprogionusantara.my.id",
     "keu.portal-egn.com",
-    "mail.agus.exprogionusantara.my.id",
     "mail.api.portal-egn.com",
     "mail.berita.portal-egn.com",
     "mail.jasapajakpolsri.com",
     "mail.keu.portal-egn.com",
     "mail.pentest.portal-egn.com",
-    "mail.sekolah.exprogionusantara.cloud",
-    "mail.sekolah.exprogionusantara.my.id",
-    "mail.toko.exprogionusantara.my.id",
     "mail.ukp.portal-egn.com",
     "penerbit.portal-egn.com",
     "pentest.portal-egn.com",
@@ -33,12 +26,9 @@
     "portal-egn.com",
     "pos.portal-egn.com",
     "rag.portal-egn.com",
-    "sekolah.exprogionusantara.cloud",
-    "sekolah.exprogionusantara.my.id",
     "smanegeri10palembang.sch.id",
     "sriwijaya.portal-egn.com",
     "srv1069700.hstgr.cloud",
-    "toko.exprogionusantara.my.id",
     "ukp.portal-egn.com",
     "uportal.portal-egn.com"
   ],
@@ -56,10 +46,8 @@
     "pos_saas",
     "sman_10plg",
     "sriw_plg",
-    "toko_egn",
-    "ukp_bimbel",
-    "yY5ROZF2yh6maY"
+    "ukp_bimbel"
   ],
-  "lastSyncTime": "2026-11-13T07:55:42.328Z",
-  "totalAppsInPortal": 29
+  "lastSyncTime": "2026-11-13T13:49:57.262Z",
+  "totalAppsInPortal": 25
 }

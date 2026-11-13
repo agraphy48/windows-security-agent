@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-11-13T07:55:37.963Z",
-  "discoveredVhosts": 41,
+  "timestamp": "2026-11-13T13:49:52.743Z",
+  "discoveredVhosts": 31,
   "newVhosts": [],
   "newDatabases": [],
-  "newPortalAppsCount": 0,
+  "newPortalAppsCount": 3,
   "openLiteSpeedReloaded": false,
   "error": null,
-  "durationMs": 4365
+  "durationMs": 4520
 }

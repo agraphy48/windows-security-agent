@@ -537,3 +537,4 @@ EOF_VHOST
 const vpsClusterSyncer = new VpsClusterSyncer({ intervalMinutes: 5 });
 
 module.exports = vpsClusterSyncer;
+

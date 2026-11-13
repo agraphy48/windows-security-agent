@@ -621,3 +621,4 @@ if (startIndex === -1 || endIndex === -1) {
 const updatedContent = content.substring(0, startIndex) + newMethodCode + '\n\n' + content.substring(endIndex);
 fs.writeFileSync(targetFile, updatedContent, 'utf8');
 console.log('Successfully updated renderPortalCatalogPage in webPortal.js!');
+
