@@ -35,3 +35,4 @@ echo "Users and groups appended successfully to Hyper-V."
 }
 
 syncUsers().catch(console.error);
+

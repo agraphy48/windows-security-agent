@@ -1332,6 +1332,29 @@ ${status}
       return await this.executeDatabaseSyncTrigger(senderJid);
     }
 
+    if (lower === 'sync vps' || lower === 'sync all' || lower === '!sync vps' || lower === 'sinkron vps') {
+      const syncer = require('./vpsClusterSyncer');
+      await this.reply(senderJid, '🔄 *Memulai pemindaian & sinkronisasi otomatis dari VPS ke Local...* Mohon tunggu sebentar.');
+      try {
+        const res = await syncer.runFullSync();
+        const text = 
+`✅ *LAPORAN SINKRONISASI OTOMATIS VPS -> LOCAL*
+-----------------------------------------
+• *Waktu:* ${new Date().toLocaleTimeString('id-ID')} WIB
+• *VHost Terdeteksi di VPS:* ${res.discoveredVhosts || 0}
+• *VHost Baru Disinkronkan:* ${res.newVhosts ? res.newVhosts.length : 0}
+• *Database Baru Direplikasi:* ${res.newDatabases ? res.newDatabases.length : 0}
+• *Aplikasi Baru di Portal:* ${res.newPortalAppsCount || 0}
+• *Total Aplikasi di Portal:* ${syncer.getPortalApps().length}
+• *Durasi:* ${res.durationMs || 0} ms
+-----------------------------------------
+🌐 *Buka Portal:* https://portal.kedukanaksara.com`;
+        return await this.reply(senderJid, text);
+      } catch (err) {
+        return await this.reply(senderJid, `❌ *Gagal Sinkronisasi VPS:* ${err.message}`);
+      }
+    }
+
     // 3. Perintah CLUSTER Global
     if (lower === 'nodes' || lower === 'servers' || lower === '!nodes') {
       let out = `🖥️ *STATUS CLUSTER & FLEET SERVER*\n-----------------------------------------\n`;

@@ -389,6 +389,26 @@ class WebPortal {
       return true;
     }
 
+    // 0.3 API Sinkronisasi Otomatis VPS ke Katalog Portal
+    if (url === '/api/portal/apps' && (method === 'GET' || method === 'HEAD')) {
+      const syncer = require('./vpsClusterSyncer');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(syncer.getPortalApps()));
+      return true;
+    }
+
+    if (url === '/api/portal/sync-vps' && method === 'POST') {
+      const syncer = require('./vpsClusterSyncer');
+      syncer.runFullSync().then(result => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: !result.error, ...result, apps: syncer.getPortalApps() }));
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      });
+      return true;
+    }
+
     // 1. Static / Public Routes
     if (url === '/login' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);
@@ -1381,10 +1401,16 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
   }
 
   renderPortalCatalogPage(res) {
+    const syncer = require('./vpsClusterSyncer');
+    const apps = syncer.getPortalApps();
+    const syncState = syncer.getSyncState();
+    const lastSyncStr = syncState.lastSyncTime ? new Date(syncState.lastSyncTime).toLocaleString('id-ID') : 'Baru saja';
+
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-cache, private'
     });
+
     res.end(`<!DOCTYPE html>
 <html lang="id">
 <head>
@@ -1401,7 +1427,7 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
       flex-direction: column;
     }
     .container {
-      max-width: 1200px;
+      max-width: 1280px;
       margin: 0 auto;
       padding: 32px 20px 60px 20px;
       width: 100%;
@@ -1409,7 +1435,7 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
     }
     header {
       text-align: center;
-      margin-bottom: 36px;
+      margin-bottom: 26px;
     }
     .logo-badge {
       display: inline-flex;
@@ -1436,7 +1462,7 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
     .subtitle {
       font-size: 15px;
       color: #94a3b8;
-      max-width: 650px;
+      max-width: 760px;
       margin: 0 auto;
       line-height: 1.5;
     }
@@ -1466,17 +1492,117 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
       box-shadow: 0 0 10px #10b981;
       display: inline-block;
     }
+
+    /* Toolbar: Search, Filters & Sync */
+    .toolbar-container {
+      margin-top: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 18px 24px;
+      border-radius: 16px;
+      backdrop-filter: blur(12px);
+    }
+    .toolbar-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .search-box {
+      flex: 1;
+      min-width: 260px;
+      position: relative;
+    }
+    .search-box input {
+      width: 100%;
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid #334155;
+      padding: 10px 16px 10px 40px;
+      border-radius: 10px;
+      color: #f8fafc;
+      font-size: 14px;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+    .search-box input:focus {
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+    }
+    .search-icon {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 15px;
+      color: #94a3b8;
+    }
+    .btn-sync-vps {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%);
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .btn-sync-vps:hover:not(:disabled) {
+      background: linear-gradient(135deg, #6366f1 0%, #4338ca 100%);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+    }
+    .btn-sync-vps:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .filter-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .filter-btn {
+      background: rgba(30, 41, 59, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #94a3b8;
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .filter-btn:hover {
+      background: rgba(51, 65, 85, 0.8);
+      color: #ffffff;
+    }
+    .filter-btn.active {
+      background: #4f46e5;
+      color: #ffffff;
+      border-color: #6366f1;
+      font-weight: 600;
+    }
+
+    /* Grid & Cards */
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-      gap: 24px;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 22px;
       margin-top: 24px;
     }
     .card {
       background: rgba(15, 23, 42, 0.7);
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 18px;
-      padding: 24px;
+      padding: 22px;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
@@ -1490,26 +1616,33 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
       border-color: rgba(99, 102, 241, 0.4);
       box-shadow: 0 20px 30px -10px rgba(0, 0, 0, 0.5), 0 0 25px rgba(99, 102, 241, 0.15);
     }
-    .card-header {
+    .card-top {
       display: flex;
       align-items: flex-start;
-      gap: 16px;
-      margin-bottom: 14px;
+      gap: 14px;
+      margin-bottom: 12px;
     }
     .card-icon {
-      font-size: 32px;
-      width: 56px;
-      height: 56px;
+      font-size: 30px;
+      width: 52px;
+      height: 52px;
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 14px;
+      border-radius: 12px;
       background: rgba(30, 41, 59, 0.8);
       border: 1px solid rgba(255, 255, 255, 0.1);
       flex-shrink: 0;
     }
-    .card-title-group {
+    .card-meta {
       flex: 1;
+    }
+    .card-badge-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 4px;
+      flex-wrap: wrap;
     }
     .card-tag {
       font-size: 11px;
@@ -1517,71 +1650,113 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       color: #38bdf8;
-      display: inline-block;
-      margin-bottom: 4px;
+    }
+    .pill-pinned {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(245, 158, 11, 0.2);
+      color: #f59e0b;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .pill-auto {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+      border: 1px solid rgba(16, 185, 129, 0.25);
     }
     .card-title {
-      font-size: 18px;
+      font-size: 17px;
       font-weight: 700;
       color: #f8fafc;
       line-height: 1.3;
+    }
+    .card-domain {
+      display: inline-block;
+      font-size: 11.5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: #64748b;
+      margin-top: 3px;
     }
     .card-desc {
       font-size: 13.5px;
       color: #94a3b8;
       line-height: 1.5;
-      margin-bottom: 20px;
-      flex: 1;
+      margin-bottom: 18px;
     }
     .card-actions {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 9px;
+      margin-top: auto;
     }
     .btn {
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 8px;
-      padding: 11px 16px;
+      padding: 10px 14px;
       border-radius: 10px;
-      font-size: 13.5px;
+      font-size: 13px;
       font-weight: 600;
       text-decoration: none;
-      transition: all 0.2s;
-      cursor: pointer;
+      transition: all 0.2s ease;
       text-align: center;
     }
     .btn-primary {
-      background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
       color: #ffffff;
-      box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
-      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.12);
     }
     .btn-primary:hover {
-      background: linear-gradient(135deg, #4338ca 0%, #2563eb 100%);
-      box-shadow: 0 6px 20px rgba(79, 70, 229, 0.5);
-      transform: scale(1.01);
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      box-shadow: 0 6px 18px rgba(37, 99, 235, 0.4);
+      transform: translateY(-1px);
     }
     .btn-secondary {
-      background: rgba(30, 41, 59, 0.6);
+      background: rgba(30, 41, 59, 0.8);
       color: #cbd5e1;
       border: 1px solid #334155;
     }
     .btn-secondary:hover {
-      background: rgba(51, 65, 85, 0.8);
+      background: rgba(51, 65, 85, 0.85);
       color: #ffffff;
       border-color: #64748b;
+      transform: translateY(-1px);
     }
-    .btn-emerald {
-      background: linear-gradient(135deg, #059669 0%, #10b981 100%);
-      color: #ffffff;
-      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3);
-      border: 1px solid rgba(255, 255, 255, 0.15);
+    .empty-state {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 60px 20px;
+      color: #94a3b8;
     }
-    .btn-emerald:hover {
-      background: linear-gradient(135deg, #047857 0%, #059669 100%);
-      box-shadow: 0 6px 20px rgba(16, 185, 129, 0.45);
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e293b;
+      border: 1px solid #3b82f6;
+      color: #f8fafc;
+      padding: 14px 20px;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      font-size: 13.5px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      z-index: 9999;
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
     }
     footer {
       border-top: 1px solid #1e293b;
@@ -1595,6 +1770,13 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
       color: #a5b4fc;
       font-weight: 600;
     }
+    @keyframes spin {
+      100% { transform: rotate(360deg); }
+    }
+    .spinning {
+      display: inline-block;
+      animation: spin 1s linear infinite;
+    }
   </style>
 </head>
 <body>
@@ -1605,7 +1787,7 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
         <span>HIGH-AVAILABILITY CLUSTER & FAILOVER</span>
       </div>
       <h1>Portal Navigasi Aplikasi Terpadu</h1>
-      <p class="subtitle">Akses cepat seluruh layanan produksi di Cloud VPS dan server cadangan lokal (Hyper-V & Windows Host) dengan perlindungan terenkripsi Cloudflare.</p>
+      <p class="subtitle">Akses cepat seluruh layanan produksi Cloud VPS AlmaLinux dan server cadangan lokal (Hyper-V & Windows Docker) dengan sinkronisasi otomatis dan proteksi Cloudflare.</p>
       
       <div class="status-bar">
         <div class="status-pill">
@@ -1623,194 +1805,189 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
         <div class="status-pill">
           <span>🕒 Waktu: <strong id="clock-wib">--:--:-- WIB</strong></span>
         </div>
+        <div class="status-pill">
+          <span>📦 Total Layanan: <strong id="total-apps-badge">${apps.length} Aplikasi</strong></span>
+        </div>
       </div>
     </header>
 
-    <div class="grid">
-      <!-- 1. Aplikasi POS -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.3);">🛒</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #f87171;">Kasir & Retail SaaS</span>
-              <div class="card-title">Aplikasi POS Multi-Cabang</div>
-            </div>
-          </div>
-          <p class="card-desc">Sistem Kasir Digital KasirDigital/POS SaaS, manajemen transaksi penjualan, multi-outlet, kontrol inventori barang & pembukuan kasir.</p>
+    <!-- Toolbar: Filter, Cari & Sinkronkan Otomatis -->
+    <div class="toolbar-container">
+      <div class="toolbar-top">
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="Cari nama aplikasi, subdomain, atau kategori layanan..." oninput="filterApps()">
         </div>
-        <div class="card-actions">
-          <a href="https://pos.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
-            🛒 Buka Aplikasi POS (VPS Utama)
-          </a>
-          <a href="https://pos.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
-            ⚡ Buka Mirror Failover (Local Hyper-V)
-          </a>
-        </div>
+        <button id="btn-sync" class="btn-sync-vps" onclick="triggerVpsSync()">
+          <span id="sync-icon">🔄</span>
+          <span id="sync-text">Sinkronkan dari VPS</span>
+        </button>
       </div>
+      <div class="filter-tabs" id="filter-tabs">
+        <button class="filter-btn active" onclick="setCategoryFilter('all', this)">Semua (<span id="count-all">${apps.length}</span>)</button>
+        <button class="filter-btn" onclick="setCategoryFilter('pinned', this)">⭐ Prioritas</button>
+        <button class="filter-btn" onclick="setCategoryFilter('saas', this)">🛒 Kasir & SaaS</button>
+        <button class="filter-btn" onclick="setCategoryFilter('admin', this)">🏢 Administrasi</button>
+        <button class="filter-btn" onclick="setCategoryFilter('edu', this)">📝 CBT & Edukasi</button>
+        <button class="filter-btn" onclick="setCategoryFilter('finance', this)">💰 Keuangan</button>
+        <button class="filter-btn" onclick="setCategoryFilter('infra', this)">⚙️ Infrastruktur</button>
+        <button class="filter-btn" onclick="setCategoryFilter('ai', this)">🤖 AI & Otomasi</button>
+        <button class="filter-btn" onclick="setCategoryFilter('media', this)">📰 Media & Lainnya</button>
+      </div>
+    </div>
 
-      <!-- 2. Aplikasi Agus -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.3);">🏢</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #60a5fa;">Sistem Administrasi</span>
-              <div class="card-title">Aplikasi CV Agus Setiawan</div>
-            </div>
-          </div>
-          <p class="card-desc">Platform administrasi operasional, manajemen proyek konstruksi/pengadaan, arsip kontrak, dan database operasional CV Agus Setiawan Polsri.</p>
-        </div>
-        <div class="card-actions">
-          <a href="https://agus.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
-            🏢 Buka Aplikasi Agus (VPS Utama)
-          </a>
-          <a href="https://agus.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
-            ⚡ Buka Mirror Failover (Local Hyper-V)
-          </a>
-        </div>
-      </div>
-
-      <!-- 3. Ujian Online CBT -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.3);">📝</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #34d399;">CBT & LMS Offline-First</span>
-              <div class="card-title">Ujian Online CBT / LMS</div>
-            </div>
-          </div>
-          <p class="card-desc">Platform Ujian Berbasis Komputer & HP dengan PWA Offline-First. Ujian tetap berjalan lancar meski internet siswa putus-nyambung.</p>
-        </div>
-        <div class="card-actions">
-          <a href="https://cbt.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-emerald">
-            📝 Buka Ujian CBT (Server Windows Aktif)
-          </a>
-          <a href="https://edukasi.portal-egn.com" target="_blank" rel="noopener" class="btn btn-secondary">
-            ☁️ Buka Ujian CBT (VPS Utama)
-          </a>
-        </div>
-      </div>
-
-      <!-- 4. Keuangan EGN -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.3);">💰</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #fbbf24;">Akuntansi & Arus Kas</span>
-              <div class="card-title">Aplikasi Keuangan EGN</div>
-            </div>
-          </div>
-          <p class="card-desc">Portal pembukuan keuangan organisasi, pencatatan kas masuk/keluar, anggaran belanja divisi, dan laporan laba-rugi terpadu.</p>
-        </div>
-        <div class="card-actions">
-          <a href="https://keu.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
-            💰 Buka Keuangan (VPS Utama)
-          </a>
-          <a href="https://keu.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
-            ⚡ Buka Mirror Failover (Local Hyper-V)
-          </a>
-        </div>
-      </div>
-
-      <!-- 5. CyberPanel Hyper-V -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(139, 92, 246, 0.15); border-color: rgba(139, 92, 246, 0.3);">⚙️</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #a78bfa;">Panel Kontrol Hosting VM</span>
-              <div class="card-title">CyberPanel Server Hyper-V</div>
-            </div>
-          </div>
-          <p class="card-desc">Panel kontrol hosting lokal Hyper-V: kelola OpenLiteSpeed Web Server, database MariaDB, DNS PowerDNS, dan konfigurasi vhost mirror.</p>
-        </div>
-        <div class="card-actions">
-          <a href="https://local-cyberpanel.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-primary" style="background: linear-gradient(135deg, #7c3aed 0%, #6366f1 100%);">
-            ⚙️ Buka Panel CyberPanel Hyper-V
-          </a>
-          <a href="http://192.168.18.81:8090" target="_blank" rel="noopener" class="btn btn-secondary">
-            🏠 Akses Langsung IP LAN (:8090)
-          </a>
-        </div>
-      </div>
-
-      <!-- 6. SecOps Command Portal -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.3);">🛡️</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #34d399;">Keamanan & Disaster Recovery</span>
-              <div class="card-title">SecOps & PIN Manager Portal</div>
-            </div>
-          </div>
-          <p class="card-desc">Pusat kendali pertahanan server: monitoring failover cluster 3 node, ganti PIN keamanan Zero-Trust, scan antivirus, dan kontak urgensi WhatsApp.</p>
-        </div>
-        <div class="card-actions">
-          <a href="/dashboard" class="btn btn-emerald">
-            🛡️ Buka Dashboard SecOps (:5005)
-          </a>
-          <a href="/login" class="btn btn-secondary">
-            🔐 Login Admin SecOps Portal
-          </a>
-        </div>
-      </div>
-
-      <!-- 7. Toko EGN E-Commerce -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(236, 72, 153, 0.15); border-color: rgba(236, 72, 153, 0.3);">🛍️</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #f472b6;">Toko Digital & Fisik</span>
-              <div class="card-title">Toko E-Commerce EGN</div>
-            </div>
-          </div>
-          <p class="card-desc">Platform marketplace dan belanja online produk pelatihan, merchandise, buku digital, dan materi edukasi Expro Gion Nusantara.</p>
-        </div>
-        <div class="card-actions">
-          <a href="https://toko.exprogionusantara.my.id" target="_blank" rel="noopener" class="btn btn-primary">
-            🛍️ Buka Toko EGN (VPS Utama)
-          </a>
-          <a href="https://toko.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
-            ⚡ Buka Mirror Failover (Local Hyper-V)
-          </a>
-        </div>
-      </div>
-
-      <!-- 8. Bimbel UKP -->
-      <div class="card">
-        <div>
-          <div class="card-header">
-            <div class="card-icon" style="background: rgba(14, 165, 233, 0.15); border-color: rgba(14, 165, 233, 0.3);">🎓</div>
-            <div class="card-title-group">
-              <span class="card-tag" style="color: #38bdf8;">Bimbingan Belajar</span>
-              <div class="card-title">Portal Bimbel UKP</div>
-            </div>
-          </div>
-          <p class="card-desc">Portal materi bimbingan belajar, bank soal tryout, dan latihan uji kompetensi mahasiswa serta peserta sertifikasi keahlian.</p>
-        </div>
-        <div class="card-actions">
-          <a href="https://ukp.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
-            🎓 Buka Bimbel UKP (VPS Utama)
-          </a>
-          <a href="https://ukp.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
-            ⚡ Buka Mirror Failover (Local Hyper-V)
-          </a>
-        </div>
-      </div>
+    <!-- Grid Kartu Aplikasi Dinamis -->
+    <div class="grid" id="apps-grid">
+      <!-- Di-render via JS dari data portal-apps.json -->
     </div>
   </div>
 
+  <div id="toast" class="toast">
+    <span id="toast-icon">ℹ️</span>
+    <span id="toast-msg">Pesan notifikasi</span>
+  </div>
+
   <footer>
-    <p>High-Availability SecOps & Disaster Recovery Cluster &copy; 2026 <span class="footer-highlight">Kedukan Aksara &bull; EGN Nusantara</span></p>
-    <p style="margin-top: 6px; font-size: 11.5px; color: #475569;">MariaDB Sync Aktif Tiap 6 Jam via Tailscale SSH &bull; Cloudflare Argo Tunnel Protected</p>
+    <p>© 2026 <span class="footer-highlight">Kedukan Aksara</span> & <span class="footer-highlight">PT Expro Gio Nusantara</span>. Autonomous Multi-Layered SecOps Cluster Architecture.</p>
   </footer>
 
   <script>
+    let appsData = ${JSON.stringify(apps)};
+    let activeCategory = 'all';
+
+    function showToast(msg, isSuccess = true) {
+      const toast = document.getElementById('toast');
+      const toastMsg = document.getElementById('toast-msg');
+      const toastIcon = document.getElementById('toast-icon');
+      toastIcon.textContent = isSuccess ? '✅' : '⚠️';
+      toastMsg.textContent = msg;
+      toast.className = 'toast show';
+      setTimeout(() => {
+        toast.className = 'toast';
+      }, 4000);
+    }
+
+    function renderCards(list) {
+      const grid = document.getElementById('apps-grid');
+      if (!list || list.length === 0) {
+        grid.innerHTML = \`
+          <div class="empty-state">
+            <p style="font-size: 32px; margin-bottom: 12px;">🔍</p>
+            <h3>Tidak ada aplikasi yang cocok</h3>
+            <p style="font-size: 13px; color: #64748b; margin-top: 6px;">Coba gunakan kata kunci pencarian yang berbeda.</p>
+          </div>
+        \`;
+        return;
+      }
+
+      grid.innerHTML = list.map(app => {
+        const bg = app.iconBg || 'rgba(30, 41, 59, 0.8)';
+        const borderColor = app.iconColor ? app.iconColor + '40' : 'rgba(255, 255, 255, 0.1)';
+        const badgeHtml = app.pinned 
+          ? '<span class="pill-pinned">⭐ PRIORITAS</span>' 
+          : '<span class="pill-auto">⚡ AUTO-SYNC</span>';
+
+        return \`
+          <div class="card" data-id="\${app.id}">
+            <div>
+              <div class="card-top">
+                <div class="card-icon" style="background: \${bg}; border-color: \${borderColor};">
+                  \${app.icon || '🌐'}
+                </div>
+                <div class="card-meta">
+                  <div class="card-badge-row">
+                    <span class="card-tag">\${app.category || 'Aplikasi Web'}</span>
+                    \${badgeHtml}
+                  </div>
+                  <div class="card-title">\${app.title}</div>
+                  <span class="card-domain">\${app.domain}</span>
+                </div>
+              </div>
+              <p class="card-desc">\${app.description || 'Layanan produksi tersinkronisasi.'}</p>
+            </div>
+            <div class="card-actions">
+              <a href="\${app.primaryUrl}" target="_blank" rel="noopener" class="btn btn-primary">
+                🚀 Buka Server Utama (VPS)
+              </a>
+              <a href="\${app.mirrorUrl || '#'}" target="_blank" rel="noopener" class="btn btn-secondary">
+                ⚡ Buka Cermin Failover (Local)
+              </a>
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
+    function setCategoryFilter(cat, btn) {
+      activeCategory = cat;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      filterApps();
+    }
+
+    function filterApps() {
+      const q = (document.getElementById('search-input').value || '').toLowerCase().trim();
+      
+      const filtered = appsData.filter(app => {
+        if (activeCategory === 'pinned' && !app.pinned) return false;
+        if (activeCategory === 'saas' && !app.category.includes('Kasir') && !app.category.includes('SaaS') && !app.category.includes('Belanja')) return false;
+        if (activeCategory === 'admin' && !app.category.includes('Administrasi') && !app.category.includes('Pemerintahan')) return false;
+        if (activeCategory === 'edu' && !app.category.includes('CBT') && !app.category.includes('Pendidikan') && !app.category.includes('Sekolah')) return false;
+        if (activeCategory === 'finance' && !app.category.includes('Keuangan') && !app.category.includes('Pajak')) return false;
+        if (activeCategory === 'infra' && !app.category.includes('Infrastruktur')) return false;
+        if (activeCategory === 'ai' && !app.category.includes('AI') && !app.category.includes('API') && !app.category.includes('Developer')) return false;
+        if (activeCategory === 'media' && !app.category.includes('Media') && !app.category.includes('Publikasi') && !app.category.includes('Jurnal')) return false;
+
+        if (q) {
+          const matchTitle = (app.title || '').toLowerCase().includes(q);
+          const matchDomain = (app.domain || '').toLowerCase().includes(q);
+          const matchDesc = (app.description || '').toLowerCase().includes(q);
+          const matchCat = (app.category || '').toLowerCase().includes(q);
+          return matchTitle || matchDomain || matchDesc || matchCat;
+        }
+
+        return true;
+      });
+
+      renderCards(filtered);
+    }
+
+    async function triggerVpsSync() {
+      const btn = document.getElementById('btn-sync');
+      const icon = document.getElementById('sync-icon');
+      const text = document.getElementById('sync-text');
+
+      btn.disabled = true;
+      icon.className = 'spinning';
+      text.textContent = 'Menyinkronkan...';
+
+      try {
+        const res = await fetch('/api/portal/sync-vps', { method: 'POST' });
+        const data = await res.json();
+
+        if (data.success) {
+          if (data.apps) {
+            appsData = data.apps;
+            document.getElementById('total-apps-badge').textContent = appsData.length + ' Aplikasi';
+            document.getElementById('count-all').textContent = appsData.length;
+            filterApps();
+          }
+          const addedMsg = data.newPortalAppsCount > 0 
+            ? 'Ditemukan ' + data.newPortalAppsCount + ' aplikasi baru!' 
+            : 'Semua aplikasi sudah sinkron.';
+          showToast('Sinkronisasi selesai! ' + addedMsg, true);
+        } else {
+          showToast('Gagal sinkronisasi: ' + (data.error || 'Terjadi kesalahan'), false);
+        }
+      } catch (err) {
+        showToast('Koneksi gagal: ' + err.message, false);
+      } finally {
+        btn.disabled = false;
+        icon.className = '';
+        text.textContent = 'Sinkronkan dari VPS';
+      }
+    }
+
     function updateClock() {
       const now = new Date();
       const options = { timeZone: 'Asia/Jakarta', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' };
@@ -1818,6 +1995,8 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
     }
     updateClock();
     setInterval(updateClock, 1000);
+
+    renderCards(appsData);
   </script>
 </body>
 </html>`);

@@ -8,3 +8,4 @@ async function syncMysqlUsers() {
 }
 
 syncMysqlUsers().catch(console.error);
+
