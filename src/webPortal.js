@@ -378,6 +378,17 @@ class WebPortal {
       return true;
     }
 
+    // 0.2 Dashboard Web Portal Navigasi Terpadu (Katalog Aplikasi)
+    if ((host.startsWith('portal.kedukanaksara.com') && (url === '/' || url === '/portal')) || url === '/portal' || url === '/apps') {
+      if (method === 'HEAD') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end();
+        return true;
+      }
+      this.renderPortalCatalogPage(res);
+      return true;
+    }
+
     // 1. Static / Public Routes
     if (url === '/login' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);
@@ -1367,6 +1378,449 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
     } catch (err) {
       console.error('[WebPortal] Gagal menulis update PIN ke .env:', err.message);
     }
+  }
+
+  renderPortalCatalogPage(res) {
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-cache, private'
+    });
+    res.end(`<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portal Aplikasi & Layanan Terpadu - Kedukan Aksara / EGN</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body {
+      background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, #0b0f19 65%);
+      color: #f1f5f9;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 20px 60px 20px;
+      width: 100%;
+      flex: 1;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 36px;
+    }
+    .logo-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      padding: 6px 16px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #a5b4fc;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, #ffffff 40%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      font-size: 15px;
+      color: #94a3b8;
+      max-width: 650px;
+      margin: 0 auto;
+      line-height: 1.5;
+    }
+    .status-bar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 20px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid #334155;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      color: #cbd5e1;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+      display: inline-block;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 24px;
+      margin-top: 24px;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 18px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: all 0.25s ease;
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(12px);
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(99, 102, 241, 0.4);
+      box-shadow: 0 20px 30px -10px rgba(0, 0, 0, 0.5), 0 0 25px rgba(99, 102, 241, 0.15);
+    }
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    .card-icon {
+      font-size: 32px;
+      width: 56px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 14px;
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      flex-shrink: 0;
+    }
+    .card-title-group {
+      flex: 1;
+    }
+    .card-tag {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #38bdf8;
+      display: inline-block;
+      margin-bottom: 4px;
+    }
+    .card-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #f8fafc;
+      line-height: 1.3;
+    }
+    .card-desc {
+      font-size: 13.5px;
+      color: #94a3b8;
+      line-height: 1.5;
+      margin-bottom: 20px;
+      flex: 1;
+    }
+    .card-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 11px 16px;
+      border-radius: 10px;
+      font-size: 13.5px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
+      cursor: pointer;
+      text-align: center;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #4338ca 0%, #2563eb 100%);
+      box-shadow: 0 6px 20px rgba(79, 70, 229, 0.5);
+      transform: scale(1.01);
+    }
+    .btn-secondary {
+      background: rgba(30, 41, 59, 0.6);
+      color: #cbd5e1;
+      border: 1px solid #334155;
+    }
+    .btn-secondary:hover {
+      background: rgba(51, 65, 85, 0.8);
+      color: #ffffff;
+      border-color: #64748b;
+    }
+    .btn-emerald {
+      background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    .btn-emerald:hover {
+      background: linear-gradient(135deg, #047857 0%, #059669 100%);
+      box-shadow: 0 6px 20px rgba(16, 185, 129, 0.45);
+    }
+    footer {
+      border-top: 1px solid #1e293b;
+      padding: 24px 20px;
+      text-align: center;
+      font-size: 13px;
+      color: #64748b;
+      background: rgba(11, 15, 25, 0.95);
+    }
+    .footer-highlight {
+      color: #a5b4fc;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo-badge">
+        <span>🌐</span>
+        <span>HIGH-AVAILABILITY CLUSTER & FAILOVER</span>
+      </div>
+      <h1>Portal Navigasi Aplikasi Terpadu</h1>
+      <p class="subtitle">Akses cepat seluruh layanan produksi di Cloud VPS dan server cadangan lokal (Hyper-V & Windows Host) dengan perlindungan terenkripsi Cloudflare.</p>
+      
+      <div class="status-bar">
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          <span>Master VPS: <strong>Online (Cloud)</strong></span>
+        </div>
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          <span>Hyper-V Worker: <strong>Online (192.168.18.81)</strong></span>
+        </div>
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          <span>Windows Standby: <strong>Online (:5005)</strong></span>
+        </div>
+        <div class="status-pill">
+          <span>🕒 Waktu: <strong id="clock-wib">--:--:-- WIB</strong></span>
+        </div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- 1. Aplikasi POS -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.3);">🛒</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #f87171;">Kasir & Retail SaaS</span>
+              <div class="card-title">Aplikasi POS Multi-Cabang</div>
+            </div>
+          </div>
+          <p class="card-desc">Sistem Kasir Digital KasirDigital/POS SaaS, manajemen transaksi penjualan, multi-outlet, kontrol inventori barang & pembukuan kasir.</p>
+        </div>
+        <div class="card-actions">
+          <a href="https://pos.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
+            🛒 Buka Aplikasi POS (VPS Utama)
+          </a>
+          <a href="https://pos.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
+            ⚡ Buka Mirror Failover (Local Hyper-V)
+          </a>
+        </div>
+      </div>
+
+      <!-- 2. Aplikasi Agus -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.3);">🏢</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #60a5fa;">Sistem Administrasi</span>
+              <div class="card-title">Aplikasi CV Agus Setiawan</div>
+            </div>
+          </div>
+          <p class="card-desc">Platform administrasi operasional, manajemen proyek konstruksi/pengadaan, arsip kontrak, dan database operasional CV Agus Setiawan Polsri.</p>
+        </div>
+        <div class="card-actions">
+          <a href="https://agus.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
+            🏢 Buka Aplikasi Agus (VPS Utama)
+          </a>
+          <a href="https://agus.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
+            ⚡ Buka Mirror Failover (Local Hyper-V)
+          </a>
+        </div>
+      </div>
+
+      <!-- 3. Ujian Online CBT -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.3);">📝</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #34d399;">CBT & LMS Offline-First</span>
+              <div class="card-title">Ujian Online CBT / LMS</div>
+            </div>
+          </div>
+          <p class="card-desc">Platform Ujian Berbasis Komputer & HP dengan PWA Offline-First. Ujian tetap berjalan lancar meski internet siswa putus-nyambung.</p>
+        </div>
+        <div class="card-actions">
+          <a href="https://cbt.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-emerald">
+            📝 Buka Ujian CBT (Server Windows Aktif)
+          </a>
+          <a href="https://edukasi.portal-egn.com" target="_blank" rel="noopener" class="btn btn-secondary">
+            ☁️ Buka Ujian CBT (VPS Utama)
+          </a>
+        </div>
+      </div>
+
+      <!-- 4. Keuangan EGN -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.3);">💰</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #fbbf24;">Akuntansi & Arus Kas</span>
+              <div class="card-title">Aplikasi Keuangan EGN</div>
+            </div>
+          </div>
+          <p class="card-desc">Portal pembukuan keuangan organisasi, pencatatan kas masuk/keluar, anggaran belanja divisi, dan laporan laba-rugi terpadu.</p>
+        </div>
+        <div class="card-actions">
+          <a href="https://keu.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
+            💰 Buka Keuangan (VPS Utama)
+          </a>
+          <a href="https://keu.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
+            ⚡ Buka Mirror Failover (Local Hyper-V)
+          </a>
+        </div>
+      </div>
+
+      <!-- 5. CyberPanel Hyper-V -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(139, 92, 246, 0.15); border-color: rgba(139, 92, 246, 0.3);">⚙️</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #a78bfa;">Panel Kontrol Hosting VM</span>
+              <div class="card-title">CyberPanel Server Hyper-V</div>
+            </div>
+          </div>
+          <p class="card-desc">Panel kontrol hosting lokal Hyper-V: kelola OpenLiteSpeed Web Server, database MariaDB, DNS PowerDNS, dan konfigurasi vhost mirror.</p>
+        </div>
+        <div class="card-actions">
+          <a href="https://local-cyberpanel.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-primary" style="background: linear-gradient(135deg, #7c3aed 0%, #6366f1 100%);">
+            ⚙️ Buka Panel CyberPanel Hyper-V
+          </a>
+          <a href="http://192.168.18.81:8090" target="_blank" rel="noopener" class="btn btn-secondary">
+            🏠 Akses Langsung IP LAN (:8090)
+          </a>
+        </div>
+      </div>
+
+      <!-- 6. SecOps Command Portal -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.3);">🛡️</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #34d399;">Keamanan & Disaster Recovery</span>
+              <div class="card-title">SecOps & PIN Manager Portal</div>
+            </div>
+          </div>
+          <p class="card-desc">Pusat kendali pertahanan server: monitoring failover cluster 3 node, ganti PIN keamanan Zero-Trust, scan antivirus, dan kontak urgensi WhatsApp.</p>
+        </div>
+        <div class="card-actions">
+          <a href="/dashboard" class="btn btn-emerald">
+            🛡️ Buka Dashboard SecOps (:5005)
+          </a>
+          <a href="/login" class="btn btn-secondary">
+            🔐 Login Admin SecOps Portal
+          </a>
+        </div>
+      </div>
+
+      <!-- 7. Toko EGN E-Commerce -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(236, 72, 153, 0.15); border-color: rgba(236, 72, 153, 0.3);">🛍️</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #f472b6;">Toko Digital & Fisik</span>
+              <div class="card-title">Toko E-Commerce EGN</div>
+            </div>
+          </div>
+          <p class="card-desc">Platform marketplace dan belanja online produk pelatihan, merchandise, buku digital, dan materi edukasi Expro Gion Nusantara.</p>
+        </div>
+        <div class="card-actions">
+          <a href="https://toko.exprogionusantara.my.id" target="_blank" rel="noopener" class="btn btn-primary">
+            🛍️ Buka Toko EGN (VPS Utama)
+          </a>
+          <a href="https://toko.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
+            ⚡ Buka Mirror Failover (Local Hyper-V)
+          </a>
+        </div>
+      </div>
+
+      <!-- 8. Bimbel UKP -->
+      <div class="card">
+        <div>
+          <div class="card-header">
+            <div class="card-icon" style="background: rgba(14, 165, 233, 0.15); border-color: rgba(14, 165, 233, 0.3);">🎓</div>
+            <div class="card-title-group">
+              <span class="card-tag" style="color: #38bdf8;">Bimbingan Belajar</span>
+              <div class="card-title">Portal Bimbel UKP</div>
+            </div>
+          </div>
+          <p class="card-desc">Portal materi bimbingan belajar, bank soal tryout, dan latihan uji kompetensi mahasiswa serta peserta sertifikasi keahlian.</p>
+        </div>
+        <div class="card-actions">
+          <a href="https://ukp.portal-egn.com" target="_blank" rel="noopener" class="btn btn-primary">
+            🎓 Buka Bimbel UKP (VPS Utama)
+          </a>
+          <a href="https://ukp.kedukanaksara.com" target="_blank" rel="noopener" class="btn btn-secondary">
+            ⚡ Buka Mirror Failover (Local Hyper-V)
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>High-Availability SecOps & Disaster Recovery Cluster &copy; 2026 <span class="footer-highlight">Kedukan Aksara &bull; EGN Nusantara</span></p>
+    <p style="margin-top: 6px; font-size: 11.5px; color: #475569;">MariaDB Sync Aktif Tiap 6 Jam via Tailscale SSH &bull; Cloudflare Argo Tunnel Protected</p>
+  </footer>
+
+  <script>
+    function updateClock() {
+      const now = new Date();
+      const options = { timeZone: 'Asia/Jakarta', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' };
+      document.getElementById('clock-wib').textContent = now.toLocaleTimeString('id-ID', options) + ' WIB';
+    }
+    updateClock();
+    setInterval(updateClock, 1000);
+  </script>
+</body>
+</html>`);
   }
 
   renderLoginPage(res, req) {
