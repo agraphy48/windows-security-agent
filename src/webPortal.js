@@ -431,6 +431,24 @@ class WebPortal {
       return true;
     }
 
+    if ((url === '/api/backup/download/manual-pdf' || url === '/api/backup/download/doc-pdf') && (method === 'GET' || method === 'HEAD')) {
+      const pdfPath = fs.existsSync('F:\\BACKUP_SYSTEM_IMAGE\\Dokumentasi-Sistem-Backup-dan-AI-WhatsApp.pdf')
+        ? 'F:\\BACKUP_SYSTEM_IMAGE\\Dokumentasi-Sistem-Backup-dan-AI-WhatsApp.pdf'
+        : 'D:\\Hyper-V\\Dokumentasi-Sistem-Backup-dan-AI-WhatsApp.pdf';
+      if (fs.existsSync(pdfPath)) {
+        res.writeHead(200, {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': 'inline; filename="Dokumentasi-Sistem-Backup-dan-AI-WhatsApp.pdf"'
+        });
+        if (method === 'HEAD') return res.end();
+        fs.createReadStream(pdfPath).pipe(res);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('File PDF Dokumentasi tidak ditemukan');
+      }
+      return true;
+    }
+
     if (url === '/api/backup/view/html' && (method === 'GET' || method === 'HEAD')) {
       const htmlPath = fs.existsSync('F:\\BACKUP_SYSTEM_IMAGE\\PANDUAN_PEMULIHAN_SSD_BARU.html')
         ? 'F:\\BACKUP_SYSTEM_IMAGE\\PANDUAN_PEMULIHAN_SSD_BARU.html'

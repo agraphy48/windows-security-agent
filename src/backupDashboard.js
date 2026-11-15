@@ -605,14 +605,25 @@ function renderBackupDashboardHtml(userSession = {}) {
     <!-- Tab 3: Disaster Recovery Kit -->
     <div id="tab-kit" class="tab-pane">
       <div class="recovery-grid">
+        <div class="recovery-card" style="border: 1.5px solid #0284c7; background: rgba(2, 132, 199, 0.04);">
+          <div class="recovery-card-title">
+            <span>📘</span>
+            <span>Buku Panduan Operasional Sistem & AI (PDF)</span>
+          </div>
+          <p>Dokumen resmi komprehensif v2.5: Panduan arsitektur HA Cluster 3-Node, Portal 2FA, Bot WhatsApp AI Antigravity, dan manajemen cadangan.</p>
+          <a href="/api/backup/download/manual-pdf" class="nav-btn primary" target="_blank" style="text-align: center; justify-content: center; background: #0284c7;">
+            📥 Unduh Buku Panduan PDF (v2.5)
+          </a>
+        </div>
+
         <div class="recovery-card">
           <div class="recovery-card-title">
             <span>📄</span>
-            <span>Dokumen SOP Pemulihan (PDF Standar A4)</span>
+            <span>Dokumen SOP Pemulihan SSD Baru (PDF)</span>
           </div>
-          <p>Dokumen resmi 4 halaman berisi langkah detail pemasangan SSD baru, partisi GPT, aktivasi Hyper-V, transfer file Robocopy, dan pengujian.</p>
-          <a href="/api/backup/download/pdf" class="nav-btn primary" target="_blank" style="text-align: center; justify-content: center;">
-            📥 Buka / Unduh PDF SOP
+          <p>Dokumen resmi berisi langkah detail pemasangan SSD baru, partisi GPT, aktivasi Hyper-V, transfer file Robocopy, dan pengujian.</p>
+          <a href="/api/backup/download/pdf" class="nav-btn" target="_blank" style="text-align: center; justify-content: center;">
+            📥 Buka / Unduh SOP SSD PDF
           </a>
         </div>
 
