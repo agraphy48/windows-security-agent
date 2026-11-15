@@ -1654,6 +1654,28 @@ ${status}
       }
     }
 
+    // 16.5. Perintah Business Intelligence & Kueri Database Web (keu.portal-egn.com, penjualan madu, omset, dll.)
+    const isBiQuery = lower.startsWith('!keu') || 
+                      lower.startsWith('!laporan') || 
+                      lower.startsWith('!omset') || 
+                      lower.includes('keu.portal-egn.com') || 
+                      lower.includes('penjualan madu') || 
+                      lower.includes('laporan keuangan') ||
+                      (lower.includes('madu') && (lower.includes('jual') || lower.includes('laporan') || lower.includes('omset') || lower.includes('kas')));
+
+    if (isBiQuery && !lower.startsWith('!agy') && !lower.startsWith('!antigravity')) {
+      await this.reply(senderJid, '⏳ Menghubungkan ke database web dan menyusun laporan data...');
+      try {
+        const bi = require('./businessIntelligence');
+        const biResponse = await bi.answerWithAiGrounded(text, senderJid);
+        if (biResponse) {
+          return await this.reply(senderJid, biResponse);
+        }
+      } catch (err) {
+        console.error('[WhatsApp BI Error]:', err.message);
+      }
+    }
+
     // 17. Perintah Khusus Antigravity Task Bridge & AI Server Windows
     const isAgyCommand = lower.startsWith('!agy') || lower.startsWith('!ai') || lower.startsWith('!antigravity') || 
                          lower.startsWith('agy ') || lower.startsWith('antigravity ');
@@ -1774,6 +1796,19 @@ _Konfirmasi berlaku 60 detik. Ketik *batal* untuk batalkan._
 
   async replyWithAI(senderJid, userQuestion) {
     try {
+      // 1. Cek apakah pertanyaan terkait Database Web / Laporan Keuangan
+      try {
+        const bi = require('./businessIntelligence');
+        if (bi.detectIntent(userQuestion)) {
+          const biAnswer = await bi.answerWithAiGrounded(userQuestion, senderJid);
+          if (biAnswer) {
+            return await this.reply(senderJid, biAnswer);
+          }
+        }
+      } catch (biErr) {
+        console.warn('[BI Grounding Warning]:', biErr.message);
+      }
+
       const health = await security.getSystemHealth();
       const prompt = `Anda adalah SysAdmin & Security Guard Agent cerdas untuk server ini.
 Kondisi server saat ini:
