@@ -657,6 +657,13 @@ class ClusterManager {
   }
 
   /**
+   * Alias untuk dispatchCommand (eksekusi perintah remote / cluster)
+   */
+  async executeRemoteCommand(targetNodeId, command, params = {}) {
+    return await this.dispatchCommand(targetNodeId, command, params);
+  }
+
+  /**
    * Perbarui file .env lokal dengan PIN baru
    */
   updateLocalEnvPin(newPin) {
