@@ -19,6 +19,10 @@ async function main() {
 
   // Hook otomatis untuk meneruskan event cluster ke WhatsApp Admin
   cluster.onClusterAlert = async (alertData) => {
+    if (alertData.alertType === '2FA_OTP') {
+      await waClient.broadcastToAdmins(alertData.message);
+      return;
+    }
     const fullMsg = 
 `🚨 *PERINGATAN ANCAMAN DARI WORKER NODE!* 🚨
 -----------------------------------------
