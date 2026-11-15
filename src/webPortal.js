@@ -420,6 +420,22 @@ class WebPortal {
       return true;
     }
 
+    // 0.4 API Status & Eksekusi Backup Berkala Server Windows (00:00 & 12:00 WIB)
+    if (url === '/api/backup/status' && (method === 'GET' || method === 'HEAD')) {
+      const scheduler = require('./backupScheduler');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(scheduler.getStatus()));
+      return true;
+    }
+
+    if (url === '/api/backup/run-now' && method === 'POST') {
+      const scheduler = require('./backupScheduler');
+      const result = scheduler.triggerBackup('WEB_PORTAL_MANUAL');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return true;
+    }
+
     // 1. Static / Public Routes
     if (url === '/login' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);
@@ -1819,6 +1835,10 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
         <div class="status-pill">
           <span>📦 Total Layanan: <strong id="total-apps-badge">${apps.length} Aplikasi</strong></span>
         </div>
+        <div class="status-pill" title="Jadwal Otomatis: 00:00 & 12:00 WIB ke Drive F:\">
+          <span class="status-dot" id="backup-dot" style="background: #38bdf8; box-shadow: 0 0 10px #38bdf8;"></span>
+          <span>💾 Backup Sistem: <strong id="backup-badge-text" style="color: #38bdf8;">00:00 & 12:00 WIB</strong></span>
+        </div>
       </div>
     </header>
 
@@ -1829,10 +1849,16 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
           <span class="search-icon">🔍</span>
           <input type="text" id="search-input" placeholder="Cari nama aplikasi, subdomain, atau kategori layanan..." oninput="filterApps()">
         </div>
-        <button id="btn-sync" class="btn-sync-vps" onclick="triggerVpsSync()">
-          <span id="sync-icon">🔄</span>
-          <span id="sync-text">Sinkronkan dari VPS</span>
-        </button>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button id="btn-backup" class="btn-sync-vps" style="background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);" onclick="triggerServerBackup()">
+            <span id="backup-icon">💾</span>
+            <span id="backup-text">Backup Server Sekarang</span>
+          </button>
+          <button id="btn-sync" class="btn-sync-vps" onclick="triggerVpsSync()">
+            <span id="sync-icon">🔄</span>
+            <span id="sync-text">Sinkronkan dari VPS</span>
+          </button>
+        </div>
       </div>
       <div class="filter-tabs" id="filter-tabs">
         <button class="filter-btn active" onclick="setCategoryFilter('all', this)">Semua (<span id="count-all">${apps.length}</span>)</button>
@@ -1998,6 +2024,63 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
         text.textContent = 'Sinkronkan dari VPS';
       }
     }
+
+    async function triggerServerBackup() {
+      const btn = document.getElementById('btn-backup');
+      const icon = document.getElementById('backup-icon');
+      const text = document.getElementById('backup-text');
+
+      btn.disabled = true;
+      icon.className = 'spinning';
+      text.textContent = 'Memulai Backup...';
+
+      try {
+        const res = await fetch('/api/backup/run-now', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast('🚀 ' + data.message, true);
+          text.textContent = 'Backup Berjalan...';
+          pollBackupStatus();
+        } else {
+          showToast('⚠️ ' + data.message, false);
+          text.textContent = 'Backup Server Sekarang';
+          btn.disabled = false;
+          icon.className = '';
+        }
+      } catch (err) {
+        showToast('Koneksi gagal: ' + err.message, false);
+        text.textContent = 'Backup Server Sekarang';
+        btn.disabled = false;
+        icon.className = '';
+      }
+    }
+
+    async function pollBackupStatus() {
+      try {
+        const res = await fetch('/api/backup/status');
+        const data = await res.json();
+        const badge = document.getElementById('backup-badge-text');
+        const btn = document.getElementById('btn-backup');
+        const icon = document.getElementById('backup-icon');
+        const text = document.getElementById('backup-text');
+
+        if (data.isCurrentlyRunning) {
+          badge.textContent = 'Menyalin Data...';
+          badge.style.color = '#f59e0b';
+          btn.disabled = true;
+          icon.className = 'spinning';
+          text.textContent = 'Sedang Mencadangkan...';
+          setTimeout(pollBackupStatus, 4000);
+        } else {
+          badge.textContent = '00:00 & 12:00 WIB';
+          badge.style.color = '#38bdf8';
+          btn.disabled = false;
+          icon.className = '';
+          text.textContent = 'Backup Server Sekarang';
+        }
+      } catch {}
+    }
+    setTimeout(pollBackupStatus, 1500);
 
     function updateClock() {
       const now = new Date();

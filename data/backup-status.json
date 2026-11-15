@@ -1,0 +1,13 @@
+{
+  "lastBackupTime": "2026-11-15 16:10:54",
+  "status": "SUCCESS",
+  "durationSeconds": 409.4,
+  "freeSpaceF_GB": 64.32,
+  "vhdxSizeGB": 23.7,
+  "schedule": [
+    "00:00",
+    "12:00"
+  ],
+  "scheduleDescription": "Setiap hari pukul 00:00 WIB (Tengah Malam) & 12:00 WIB (Siang)",
+  "nextScheduledRun": "2026-11-16T00:00:00"
+}

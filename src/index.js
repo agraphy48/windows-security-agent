@@ -85,6 +85,10 @@ Koneksi detak jantung dengan Master Koordinator telah kembali normal.`;
     const vpsClusterSyncer = require('./vpsClusterSyncer');
     vpsClusterSyncer.startWatcher();
 
+    // Aktifkan Penjadwal Backup Berkala Server Windows (00:00 & 12:00 WIB)
+    const backupScheduler = require('./backupScheduler');
+    backupScheduler.startScheduler();
+
     console.log('[Standby Mode] Node standby aktif memantau kesehatan Master Utama.');
     return;
   }
@@ -97,6 +101,10 @@ Koneksi detak jantung dengan Master Koordinator telah kembali normal.`;
   // Aktifkan Background Auto-Sync Watcher VPS ke Local & Dynamic Web Portal
   const vpsClusterSyncer = require('./vpsClusterSyncer');
   vpsClusterSyncer.startWatcher();
+
+  // Aktifkan Penjadwal Backup Berkala Server Windows (00:00 & 12:00 WIB)
+  const backupScheduler = require('./backupScheduler');
+  backupScheduler.startScheduler();
 
   // Tangani graceful shutdown
   process.on('SIGINT', () => {
