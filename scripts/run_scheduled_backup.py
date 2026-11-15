@@ -18,6 +18,7 @@ DATA_DIR = r"D:\AI-Server\security-agent\data"
 LOG_DIR = r"D:\AI-Server\security-agent\logs"
 LOCK_FILE = os.path.join(DATA_DIR, "backup.lock")
 STATUS_FILE = os.path.join(DATA_DIR, "backup-status.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "backup-history.json")
 LOG_FILE_LOCAL = os.path.join(LOG_DIR, "backup.log")
 LOG_FILE_DEST = os.path.join(BACKUP_DEST, "backup.log")
 
@@ -152,6 +153,33 @@ def update_status(status_dict):
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump(status_dict, f, indent=2)
         
+    try:
+        history = []
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        if not isinstance(history, list):
+            history = []
+        history.insert(0, {
+            "timestamp": status_dict.get("lastBackupTime") or status_dict.get("lastRun") or get_now_str(),
+            "trigger": "Pencadangan Terjadwal (00:00 / 12:00) atau Manual",
+            "status": status_dict.get("status", "UNKNOWN"),
+            "durationSeconds": status_dict.get("durationSeconds", 0),
+            "freeSpaceF_GB": status_dict.get("freeSpaceF_GB", 0),
+            "vhdxSizeGB": status_dict.get("vhdxSizeGB", 0),
+            "details": status_dict.get("error") if status_dict.get("status") == "ERROR" else "Pencadangan Hyper-V VHDX, AI-Server, dan Kredensial Berhasil 100%"
+        })
+        history = history[:50]
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+            
+        if os.path.exists(BACKUP_DEST):
+            dest_hist = os.path.join(BACKUP_DEST, "backup-history.json")
+            with open(dest_hist, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+    except Exception as e:
+        print(f"Error updating history: {e}")
+
     if os.path.exists(BACKUP_DEST):
         try:
             dest_meta = os.path.join(BACKUP_DEST, "backup-metadata.json")

@@ -378,14 +378,91 @@ class WebPortal {
       return true;
     }
 
-    // 0.2 Dashboard Web Portal Navigasi Terpadu (Katalog Aplikasi)
+    // 0.2 Dashboard Web Portal Navigasi Terpadu (Katalog Aplikasi) - Dilindungi 2FA Session
     if ((host.startsWith('portal.kedukanaksara.com') && (url === '/' || url === '/portal')) || url === '/portal' || url === '/apps') {
+      const session = this.getSession(req);
+      if (!session) {
+        res.writeHead(302, { Location: '/login?redirect=/portal' });
+        res.end();
+        return true;
+      }
       if (method === 'HEAD') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end();
         return true;
       }
-      this.renderPortalCatalogPage(res);
+      this.renderPortalCatalogPage(res, req, session);
+      return true;
+    }
+
+    // 0.22 Dashboard Pusat Pemantauan Backup & Disaster Recovery - Dilindungi 2FA Session
+    if ((host.startsWith('backup.kedukanaksara.com') && (url === '/' || url === '/backup')) || url === '/backup') {
+      const session = this.getSession(req);
+      if (!session) {
+        res.writeHead(302, { Location: '/login?redirect=/backup' });
+        res.end();
+        return true;
+      }
+      if (method === 'HEAD') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end();
+        return true;
+      }
+      require('./backupDashboard').render(res, req, session);
+      return true;
+    }
+
+    // 0.23 API Unduh & Lihat Dokumen Pemulihan Cadangan
+    if (url === '/api/backup/download/pdf' && (method === 'GET' || method === 'HEAD')) {
+      const pdfPath = fs.existsSync('F:\\BACKUP_SYSTEM_IMAGE\\PANDUAN_PEMULIHAN_SSD_BARU.pdf')
+        ? 'F:\\BACKUP_SYSTEM_IMAGE\\PANDUAN_PEMULIHAN_SSD_BARU.pdf'
+        : 'D:\\Hyper-V\\PANDUAN_PEMULIHAN_SSD_BARU.pdf';
+      if (fs.existsSync(pdfPath)) {
+        res.writeHead(200, {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': 'inline; filename="PANDUAN_PEMULIHAN_SSD_BARU.pdf"'
+        });
+        if (method === 'HEAD') return res.end();
+        fs.createReadStream(pdfPath).pipe(res);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('File PDF tidak ditemukan');
+      }
+      return true;
+    }
+
+    if (url === '/api/backup/view/html' && (method === 'GET' || method === 'HEAD')) {
+      const htmlPath = fs.existsSync('F:\\BACKUP_SYSTEM_IMAGE\\PANDUAN_PEMULIHAN_SSD_BARU.html')
+        ? 'F:\\BACKUP_SYSTEM_IMAGE\\PANDUAN_PEMULIHAN_SSD_BARU.html'
+        : 'D:\\Hyper-V\\PANDUAN_PEMULIHAN_SSD_BARU.html';
+      if (fs.existsSync(htmlPath)) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        if (method === 'HEAD') return res.end();
+        fs.createReadStream(htmlPath).pipe(res);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('File HTML tidak ditemukan');
+      }
+      return true;
+    }
+
+    if (url === '/api/backup/view/script' && (method === 'GET' || method === 'HEAD')) {
+      const scriptPath = 'F:\\BACKUP_SYSTEM_IMAGE\\Restore-Server-NewDisk.ps1';
+      if (fs.existsSync(scriptPath)) {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        if (method === 'HEAD') return res.end();
+        fs.createReadStream(scriptPath).pipe(res);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('File script tidak ditemukan');
+      }
+      return true;
+    }
+
+    if (url === '/api/backup/logs' && (method === 'GET' || method === 'HEAD')) {
+      const scheduler = require('./backupScheduler');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ logs: scheduler.getRecentLogs(60) }));
       return true;
     }
 
@@ -440,7 +517,15 @@ class WebPortal {
     if (url === '/login' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);
       if (session) {
-        res.writeHead(302, { Location: '/dashboard' });
+        let redirectDest = '/dashboard';
+        try {
+          const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+          const p = parsedUrl.searchParams.get('redirect');
+          if (p) redirectDest = p;
+          else if (host.startsWith('portal.')) redirectDest = '/portal';
+          else if (host.startsWith('backup.')) redirectDest = '/backup';
+        } catch {}
+        res.writeHead(302, { Location: redirectDest });
         res.end();
         return true;
       }
@@ -1809,9 +1894,17 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
 <body>
   <div class="container">
     <header>
-      <div class="logo-badge">
-        <span>🌐</span>
-        <span>HIGH-AVAILABILITY CLUSTER & FAILOVER</span>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
+        <div class="logo-badge" style="margin-bottom: 0;">
+          <span>🌐</span>
+          <span>HIGH-AVAILABILITY CLUSTER & FAILOVER</span>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <a href="https://backup.kedukanaksara.com" style="text-decoration: none; font-size: 12px; font-weight: 600; padding: 6px 12px; background: rgba(2, 132, 199, 0.2); border: 1px solid #0284c7; color: #38bdf8; border-radius: 8px;">💾 Backup Center</a>
+          <a href="/duel" style="text-decoration: none; font-size: 12px; font-weight: 600; padding: 6px 12px; background: rgba(99, 102, 241, 0.2); border: 1px solid #6366f1; color: #a5b4fc; border-radius: 8px;">🎮 Game Duel</a>
+          <a href="/dashboard" style="text-decoration: none; font-size: 12px; font-weight: 600; padding: 6px 12px; background: rgba(30, 41, 59, 0.8); border: 1px solid #334155; color: #cbd5e1; border-radius: 8px;">🛡️ SecOps</a>
+          <a href="/api/logout" style="text-decoration: none; font-size: 12px; font-weight: 600; padding: 6px 12px; background: rgba(239, 68, 68, 0.2); border: 1px solid #ef4444; color: #f87171; border-radius: 8px;">🚪 Logout</a>
+        </div>
       </div>
       <h1>Portal Navigasi Aplikasi Terpadu</h1>
       <p class="subtitle">Akses cepat seluruh layanan produksi Cloud VPS AlmaLinux dan server cadangan lokal (Hyper-V & Windows Docker) dengan sinkronisasi otomatis dan proteksi Cloudflare.</p>
@@ -2433,8 +2526,17 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
             document.getElementById('otpCode').value = '';
             document.getElementById('otpCode').focus();
           } else {
-            // 2FA tidak aktif -> langsung masuk dashboard
-            window.location.href = '/dashboard';
+            // 2FA tidak aktif -> langsung masuk dashboard atau target redirect
+            const urlParams = new URLSearchParams(window.location.search);
+            const redirectParam = urlParams.get('redirect');
+            let target = redirectParam;
+            if (!target) {
+              const h = window.location.hostname.toLowerCase();
+              if (h.startsWith('backup.')) target = '/backup';
+              else if (h.startsWith('portal.')) target = '/portal';
+              else target = '/dashboard';
+            }
+            window.location.href = target;
           }
         } else {
           showAlert(data.error || 'Login gagal!');
@@ -2473,7 +2575,16 @@ _Jika bukan Anda yang melakukan ini, segera amankan server Anda!_`;
           if (timerInterval) clearInterval(timerInterval);
           showAlert(data.message || 'Verifikasi 2FA sukses! Mengalihkan...', false);
           setTimeout(() => {
-            window.location.href = '/dashboard';
+            const urlParams = new URLSearchParams(window.location.search);
+            const redirectParam = urlParams.get('redirect');
+            let target = redirectParam;
+            if (!target) {
+              const h = window.location.hostname.toLowerCase();
+              if (h.startsWith('backup.')) target = '/backup';
+              else if (h.startsWith('portal.')) target = '/portal';
+              else target = '/dashboard';
+            }
+            window.location.href = target;
           }, 800);
         } else {
           showAlert(data.error || 'Kode OTP tidak cocok.');

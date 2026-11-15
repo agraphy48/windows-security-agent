@@ -1,0 +1,20 @@
+[
+  {
+    "timestamp": "2026-11-15 16:10:54",
+    "trigger": "Pencadangan Terjadwal / Verifikasi Sistem",
+    "status": "SUCCESS",
+    "durationSeconds": 409.4,
+    "freeSpaceF_GB": 64.32,
+    "vhdxSizeGB": 23.7,
+    "details": "VHDX Atomic Swap Berhasil, Sinkronisasi D:\\Hyper-V, D:\\AI-Server, Kredensial & SOP 100% Utuh"
+  },
+  {
+    "timestamp": "2026-11-13 15:22:26",
+    "trigger": "Disaster Recovery Bare-Metal Baseline",
+    "status": "SUCCESS",
+    "durationSeconds": 175.2,
+    "freeSpaceF_GB": 57.66,
+    "vhdxSizeGB": 22.82,
+    "details": "Inisialisasi Master Image Hyper-V AlmaLinux 9, CyberPanel & 31 Website Produksi ke Drive F:\\"
+  }
+]

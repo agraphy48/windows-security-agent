@@ -27,6 +27,7 @@ class BackupScheduler {
         const raw = fs.readFileSync(STATUS_FILE, 'utf8');
         const data = JSON.parse(raw);
         data.isCurrentlyRunning = this.isBackupRunning();
+        data.disks = this.getDiskMetrics();
         return data;
       }
     } catch (e) {
@@ -39,8 +40,62 @@ class BackupScheduler {
       schedule: ['00:00', '12:00'],
       scheduleDescription: 'Setiap hari pukul 00:00 WIB (Tengah Malam) & 12:00 WIB (Siang)',
       isCurrentlyRunning: this.isBackupRunning(),
-      nextScheduledRun: this.calculateNextRunTime().toISOString()
+      nextScheduledRun: this.calculateNextRunTime().toISOString(),
+      disks: this.getDiskMetrics()
     };
+  }
+
+  getDiskMetrics() {
+    const drives = [
+      { letter: 'F', path: 'F:\\', label: 'Harddisk Eksternal (Backup Target)', isTarget: true },
+      { letter: 'D', path: 'D:\\', label: 'Data Server (Hyper-V & AI-Server)', isSource: true },
+      { letter: 'C', path: 'C:\\', label: 'Windows System (Host OS)' }
+    ];
+
+    return drives.map(d => {
+      try {
+        if (!fs.existsSync(d.path)) {
+          return { ...d, connected: false, error: 'Drive tidak terpasang' };
+        }
+        const s = fs.statfsSync(d.path);
+        const total = (s.blocks * s.bsize) / (1024 ** 3);
+        const free = (s.bfree * s.bsize) / (1024 ** 3);
+        const used = total - free;
+        const usedPct = total > 0 ? (used / total) * 100 : 0;
+        return {
+          ...d,
+          connected: true,
+          totalGB: Math.round(total * 10) / 10,
+          freeGB: Math.round(free * 10) / 10,
+          usedGB: Math.round(used * 10) / 10,
+          usedPct: Math.round(usedPct)
+        };
+      } catch (e) {
+        return { ...d, connected: false, error: e.message };
+      }
+    });
+  }
+
+  getHistory() {
+    const histFile = path.join(DATA_DIR, 'backup-history.json');
+    try {
+      if (fs.existsSync(histFile)) {
+        return JSON.parse(fs.readFileSync(histFile, 'utf8'));
+      }
+    } catch {}
+    return [];
+  }
+
+  getRecentLogs(numLines = 60) {
+    const logFile = path.join(__dirname, '..', 'logs', 'backup.log');
+    try {
+      if (fs.existsSync(logFile)) {
+        const content = fs.readFileSync(logFile, 'utf8');
+        const lines = content.split('\n').filter(Boolean);
+        return lines.slice(-numLines);
+      }
+    } catch {}
+    return ['Belum ada log aktivitas pencadangan.'];
   }
 
   isBackupRunning() {

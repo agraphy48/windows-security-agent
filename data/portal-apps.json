@@ -15,6 +15,21 @@
     "order": 0
   },
   {
+    "id": "app-backup-center",
+    "title": "Pusat Pemantauan Backup & Disaster Recovery",
+    "domain": "backup.kedukanaksara.com",
+    "category": "Infrastruktur & Cloud",
+    "icon": "💾",
+    "iconColor": "#0284c7",
+    "iconBg": "rgba(2, 132, 199, 0.15)",
+    "description": "Dashboard pemantauan pencadangan server otomatis berkala (00:00 & 12:00 WIB), laporan riwayat backup, unduh dokumen SOP pemulihan SSD, dan tombol eksekusi cadangan instan.",
+    "primaryUrl": "https://backup.kedukanaksara.com",
+    "mirrorUrl": "/backup",
+    "target": "_blank",
+    "pinned": true,
+    "order": 1
+  },
+  {
     "id": "app-pos",
     "title": "KasirDigital - Aplikasi POS SaaS Multi-Cabang",
     "domain": "pos.portal-egn.com",
