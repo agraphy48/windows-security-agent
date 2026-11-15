@@ -513,6 +513,32 @@ class WebPortal {
       return true;
     }
 
+    // 0.5 API Antigravity Task Queue Bridge
+    if (url === '/api/antigravity/tasks' && (method === 'GET' || method === 'HEAD')) {
+      const bridge = require('./antigravityBridge');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, tasks: bridge.getRecentTasks(20) }));
+      return true;
+    }
+
+    if (url === '/api/antigravity/enqueue' && method === 'POST') {
+      let bodyStr = '';
+      req.on('data', chunk => bodyStr += chunk);
+      req.on('end', () => {
+        try {
+          const body = JSON.parse(bodyStr || '{}');
+          const bridge = require('./antigravityBridge');
+          const result = bridge.enqueueTask(body.sender || 'Web Dashboard', body.prompt, 'Web API');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return true;
+    }
+
     // 1. Static / Public Routes
     if (url === '/login' && (method === 'GET' || method === 'HEAD')) {
       const session = this.getSession(req);

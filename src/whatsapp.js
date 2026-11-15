@@ -1654,7 +1654,35 @@ ${status}
       }
     }
 
-    // 16. Fallback AI Response via Ollama
+    // 17. Perintah Khusus Antigravity Task Bridge & AI Server Windows
+    const isAgyCommand = lower.startsWith('!agy') || lower.startsWith('!ai') || lower.startsWith('!antigravity') || 
+                         lower.startsWith('agy ') || lower.startsWith('antigravity ');
+    if (isAgyCommand) {
+      const prompt = raw.replace(/^(!agy|!ai|!antigravity|agy|antigravity)\s*/i, '').trim();
+      if (!prompt) {
+        return await this.reply(senderJid,
+`✨ *ANTIGRAVITY & AI COMMAND BRIDGE* 🤖
+-----------------------------------------
+Kirimkan perintah atau instruksi untuk Antigravity di server Windows.
+
+*Contoh Penggunaan:*
+• \`!agy buatkan skrip pemantauan CPU\`
+• \`!agy periksa log backup server\`
+• \`!agy buatkan fitur baru di portal\`
+• \`!ai jelaskan arsitektur failover cluster\`
+
+Tugas akan otomatis dicatat di *D:\\AI-Server\\antigravity-tasks* dan diproses oleh Antigravity.`);
+      }
+
+      return await this.handleAntigravityTask(senderJid, cleanSender, prompt);
+    }
+
+    // 18. Perintah Pencadangan Server Windows ke Drive F:
+    if (lower === 'backup server' || lower === '!backup server' || lower === 'backup windows' || lower === '!backup windows') {
+      return await this.executeWindowsServerBackup(senderJid);
+    }
+
+    // 19. Fallback AI Response via Ollama
     await this.replyWithAI(senderJid, text);
   }
 
@@ -1839,6 +1867,91 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
       } catch (err) {
         console.error(`[WA Broadcast] Gagal kirim notif ke ${number}:`, err.message);
       }
+    }
+  }
+
+  async handleAntigravityTask(senderJid, cleanSender, prompt) {
+    try {
+      let taskResult = null;
+      // Jika node ini adalah Windows (node-01), eksekusi langsung ke bridge lokal
+      if (config.nodeId === 'node-01' || config.clusterRole !== 'master') {
+        const bridge = require('./antigravityBridge');
+        taskResult = bridge.enqueueTask(cleanSender, prompt, 'WhatsApp');
+      } else {
+        // Jika Master di VPS, forward tugas ke node-01 (Server Windows)
+        const cluster = require('./cluster');
+        taskResult = await cluster.executeRemoteCommand('node-01', 'antigravity-task', {
+          sender: cleanSender,
+          prompt
+        });
+      }
+
+      const task = (taskResult && taskResult.task) ? taskResult.task : (taskResult || {});
+      const taskId = task.id || `AGY-${Date.now()}`;
+
+      // Ambil respon cepat dari AI Ollama lokal sebagai briefing awal
+      let aiBriefing = '';
+      try {
+        const aiRes = await fetch(`${config.ollamaUrl}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: config.ollamaModel,
+            prompt: `Sebagai asisten Antigravity di server Windows, berikan analisis singkat dan rekomendasi untuk permintaan user berikut (maksimal 2-3 kalimat ringkas):\n"${prompt}"`,
+            stream: false
+          }),
+          signal: AbortSignal.timeout(6000)
+        });
+        if (aiRes.ok) {
+          const aiData = await aiRes.json();
+          if (aiData.response) {
+            aiBriefing = `\n\n💡 *Analisis Awal AI Server (Ollama):*\n${aiData.response.trim()}`;
+          }
+        }
+      } catch {}
+
+      const msg = 
+`⚡ *TUGAS ANTIGRAVITY DITERIMA* 🤖
+-----------------------------------------
+• *ID Tugas:* \`${taskId}\`
+• *Server Target:* Server Utama (Windows)
+• *Perintah:* ${prompt}
+• *Status:* 🟡 Masuk Antrean (PENDING)
+• *Direktori:* \`D:\\AI-Server\\antigravity-tasks\\inbox.json\`${aiBriefing}
+-----------------------------------------
+✨ Tugas telah dicatat di server Windows dan siap dikerjakan oleh Antigravity!`;
+
+      await this.reply(senderJid, msg);
+    } catch (err) {
+      await this.reply(senderJid, `❌ Gagal mencatat tugas Antigravity: ${err.message}`);
+    }
+  }
+
+  async executeWindowsServerBackup(senderJid) {
+    try {
+      let res = null;
+      if (config.nodeId === 'node-01') {
+        const scheduler = require('./backupScheduler');
+        res = scheduler.triggerBackup('WHATSAPP_COMMAND');
+      } else {
+        const cluster = require('./cluster');
+        res = await cluster.executeRemoteCommand('node-01', 'server-backup');
+      }
+
+      if (res && res.success) {
+        await this.reply(senderJid,
+`💾 *PENCADANGAN SERVER WINDOWS DIMULAI* 🚀
+-----------------------------------------
+• *Target:* Drive F:\\BACKUP_SYSTEM_IMAGE
+• *Item:* VHDX AlmaLinux (23.7 GB), AI-Server & Kredensial
+• *Status:* ⏳ Sedang Berjalan di Latar Belakang
+-----------------------------------------
+Pantau perkembangan real-time di https://backup.kedukanaksara.com`);
+      } else {
+        await this.reply(senderJid, `⚠️ ${res?.message || 'Pencadangan sedang berlangsung atau terjadi kendala.'}`);
+      }
+    } catch (err) {
+      await this.reply(senderJid, `❌ Gagal memicu backup server: ${err.message}`);
     }
   }
 }

@@ -340,6 +340,22 @@ class ClusterManager {
       if (command === 'sync-db-trigger') {
         return await security.triggerDatabaseSync();
       }
+      if (command === 'antigravity-task') {
+        const bridge = require('./antigravityBridge');
+        return bridge.enqueueTask(params.sender || 'WhatsApp Admin', params.prompt || params.command || '', 'WhatsApp Cluster');
+      }
+      if (command === 'antigravity-tasks-list') {
+        const bridge = require('./antigravityBridge');
+        return { success: true, tasks: bridge.getPendingTasks() };
+      }
+      if (command === 'server-backup') {
+        const scheduler = require('./backupScheduler');
+        return scheduler.triggerBackup('WHATSAPP_CLUSTER');
+      }
+      if (command === 'server-backup-status') {
+        const scheduler = require('./backupScheduler');
+        return scheduler.getStatus();
+      }
       if (command === 'sync-pin') {
         const pin = String(params.pin || '').trim();
         if (!/^[0-9]{4,8}$/.test(pin)) return { error: 'Format PIN tidak valid (harus 4-8 digit angka)' };
