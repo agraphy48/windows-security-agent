@@ -1,5 +1,20 @@
 [
   {
+    "id": "app-cyber-duel",
+    "title": "Cyber Duel Arena 2026 (Game Uji Coba 1v1 & AI)",
+    "domain": "portal.kedukanaksara.com",
+    "category": "Hiburan & Game Uji Coba",
+    "icon": "⚔️",
+    "iconColor": "#38bdf8",
+    "iconBg": "rgba(56, 189, 248, 0.15)",
+    "description": "Game duel retro-futuristik 1v1 real-time. Mode Player vs Cyber AI & 2-Player Local Duel, Web Audio synthesizer, perisai energi defleksi peluru, dan power-up box.",
+    "primaryUrl": "https://portal.kedukanaksara.com/duel",
+    "mirrorUrl": "/duel",
+    "target": "_blank",
+    "pinned": true,
+    "order": 0
+  },
+  {
     "id": "app-pos",
     "title": "KasirDigital - Aplikasi POS SaaS Multi-Cabang",
     "domain": "pos.portal-egn.com",

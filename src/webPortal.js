@@ -389,6 +389,17 @@ class WebPortal {
       return true;
     }
 
+    // 0.25 Game Duel Uji Coba 1v1 & AI Arena
+    if (url === '/duel' || url === '/game') {
+      if (method === 'HEAD') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end();
+        return true;
+      }
+      require('./duelGame').render(res);
+      return true;
+    }
+
     // 0.3 API Sinkronisasi Otomatis VPS ke Katalog Portal
     if (url === '/api/portal/apps' && (method === 'GET' || method === 'HEAD')) {
       const syncer = require('./vpsClusterSyncer');

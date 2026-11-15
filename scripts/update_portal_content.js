@@ -338,3 +338,4 @@ const accurateApps = [
 
 fs.writeFileSync(APPS_FILE, JSON.stringify(accurateApps, null, 2), 'utf8');
 console.log(`[SUCCESS] Updated ${accurateApps.length} accurate production apps to ${APPS_FILE}`);
+
