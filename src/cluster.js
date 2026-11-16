@@ -281,6 +281,45 @@ class ClusterManager {
           return res.end(JSON.stringify({ success: true, message: 'Alert diterima Master dan diteruskan ke WhatsApp' }));
         }
 
+        // 5. Menerima Perintah Kirim Dokumen ke WhatsApp dari Node ke Master
+        if (url === '/api/cluster/send-document') {
+          const { targetJid, fileName, fileBase64, caption } = data;
+          console.log(`[📄 Cluster Send Document] Menerima file "${fileName}" untuk dikirim ke ${targetJid}`);
+          if (!fileBase64 || !fileName) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'fileBase64 dan fileName diperlukan' }));
+          }
+
+          if (this.whatsappClient && typeof this.whatsappClient.sendDocument === 'function') {
+            try {
+              const buffer = Buffer.from(fileBase64, 'base64');
+              const targets = [targetJid];
+              config.adminNumbers.forEach(adm => {
+                const norm = adm.replace(/[^0-9]/g, '');
+                if (norm && !targets.includes(norm)) targets.push(norm);
+              });
+
+              for (const t of targets) {
+                if (!t) continue;
+                try {
+                  await this.whatsappClient.sendDocument(t, buffer, fileName, caption);
+                } catch (sendErr) {
+                  console.error(`[Cluster Send Doc] Gagal kirim ke ${t}:`, sendErr.message);
+                }
+              }
+
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ success: true, message: `Dokumen ${fileName} berhasil dikirim ke WhatsApp.` }));
+            } catch (err) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: `Gagal mengirim dokumen: ${err.message}` }));
+            }
+          } else {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'WhatsApp socket pada Master tidak aktif' }));
+          }
+        }
+
         res.writeHead(404);
         res.end();
       });
@@ -661,6 +700,33 @@ class ClusterManager {
    */
   async executeRemoteCommand(targetNodeId, command, params = {}) {
     return await this.dispatchCommand(targetNodeId, command, params);
+  }
+
+  /**
+   * Mengirimkan dokumen (PDF, Docx, dll.) ke WhatsApp user/admin via Master Gateway
+   */
+  async sendDocumentToWhatsApp(targetJid, filePath, fileName = null, caption = '') {
+    const fs = require('fs');
+    const path = require('path');
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File ${filePath} tidak ditemukan.`);
+    }
+
+    const resolvedName = fileName || path.basename(filePath);
+    const buffer = fs.readFileSync(filePath);
+    const fileBase64 = buffer.toString('base64');
+
+    if (this.isMaster && this.whatsappClient && typeof this.whatsappClient.sendDocument === 'function') {
+      return await this.whatsappClient.sendDocument(targetJid, buffer, resolvedName, caption);
+    }
+
+    console.log(`[🌐 Cluster] Mengirim dokumen "${resolvedName}" ke Master WhatsApp Gateway (${config.masterUrl})...`);
+    return await this.postJson(`${config.masterUrl}/api/cluster/send-document`, {
+      targetJid,
+      fileName: resolvedName,
+      fileBase64,
+      caption
+    }, 45000);
   }
 
   /**

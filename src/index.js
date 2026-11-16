@@ -16,6 +16,7 @@ async function main() {
 
   const waClient = new WhatsAppClient();
   const watcher = new SecurityWatcher(waClient);
+  cluster.whatsappClient = waClient;
 
   // Hook otomatis untuk meneruskan event cluster ke WhatsApp Admin
   cluster.onClusterAlert = async (alertData) => {

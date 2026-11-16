@@ -149,6 +149,22 @@ class AntigravityBridge {
     return { success: true, task };
   }
 
+  async completeTaskWithDocument(id, responseText, filePath, fileName = null) {
+    const res = this.completeTask(id, responseText);
+    if (!res.success) return res;
+
+    const task = res.task;
+    try {
+      const cluster = require('./cluster');
+      const caption = `✅ *TUGAS ANTIGRAVITY SELESAI!*\n• *ID:* \`${task.id}\`\n• *Permintaan:* ${task.prompt}\n\n${responseText || 'Berikut dokumen PDF hasil pengerjaan Antigravity yang diminta.'}`;
+      console.log(`[AntigravityBridge] Mengirimkan dokumen ke WhatsApp ${task.sender}...`);
+      await cluster.sendDocumentToWhatsApp(task.sender, filePath, fileName, caption);
+    } catch (err) {
+      console.error('[AntigravityBridge] Gagal mengirim dokumen ke WhatsApp:', err.message);
+    }
+    return res;
+  }
+
   getRecentTasks(limit = 10) {
     const inbox = this.getTasks();
     const history = this.getHistory();

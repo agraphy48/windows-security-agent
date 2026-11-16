@@ -326,3 +326,4 @@ Instruksi:
 }
 
 module.exports = new BusinessIntelligence();
+

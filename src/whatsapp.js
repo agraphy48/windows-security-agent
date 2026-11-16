@@ -1676,6 +1676,25 @@ ${status}
       }
     }
 
+    // 16.8. Perintah Pengiriman Dokumen PDF Langsung ke WhatsApp
+    const isDocDelivery = lower.includes('mana document') || 
+                          lower.includes('mana dokumen') || 
+                          lower.includes('kirimkan document') || 
+                          lower.includes('kirimkan dokumen') || 
+                          lower.includes('kirim dokumen') || 
+                          lower.includes('kirim document') || 
+                          lower.includes('kirim pdf') || 
+                          lower.includes('minta dokumen') || 
+                          lower.includes('minta document') || 
+                          lower.includes('minta pdf') ||
+                          lower.startsWith('!doc') ||
+                          lower.startsWith('!pdf') ||
+                          (lower.includes('dokumen') && lower.includes('kirim'));
+
+    if (isDocDelivery) {
+      return await this.handleDocumentDeliveryRequest(senderJid, cleanSender, text);
+    }
+
     // 17. Perintah Khusus Antigravity Task Bridge & AI Server Windows
     const isAgyCommand = lower.startsWith('!agy') || lower.startsWith('!ai') || lower.startsWith('!antigravity') || 
                          lower.startsWith('agy ') || lower.startsWith('antigravity ');
@@ -1871,6 +1890,124 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
           this.purgeBrokenSession(cleanNum);
         } catch {}
       }
+    }
+  }
+
+  /**
+   * Mengirim dokumen (PDF, Docx, gambar, dll.) ke nomor/JID tertentu
+   */
+  async sendDocument(jid, fileInput, fileName = null, caption = '') {
+    if (!this.sock) {
+      throw new Error('WhatsApp socket tidak terhubung');
+    }
+    const fs = require('fs');
+    const path = require('path');
+
+    let buffer;
+    let resolvedName = fileName;
+
+    if (Buffer.isBuffer(fileInput)) {
+      buffer = fileInput;
+      resolvedName = resolvedName || 'document.pdf';
+    } else if (typeof fileInput === 'string') {
+      if (!fs.existsSync(fileInput)) {
+        throw new Error(`File ${fileInput} tidak ditemukan pada disk`);
+      }
+      buffer = fs.readFileSync(fileInput);
+      resolvedName = resolvedName || path.basename(fileInput);
+    } else {
+      throw new Error('Format fileInput harus berupa Buffer atau file path string');
+    }
+
+    const ext = path.extname(resolvedName).toLowerCase();
+    let mimetype = 'application/octet-stream';
+    if (ext === '.pdf') mimetype = 'application/pdf';
+    else if (ext === '.docx') mimetype = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    else if (ext === '.xlsx') mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    else if (ext === '.html') mimetype = 'text/html';
+    else if (ext === '.txt') mimetype = 'text/plain';
+    else if (ext === '.jpg' || ext === '.jpeg') mimetype = 'image/jpeg';
+    else if (ext === '.png') mimetype = 'image/png';
+
+    const targetJid = this.normalizeJid(jid);
+    const msgPayload = {
+      document: buffer,
+      mimetype,
+      fileName: resolvedName
+    };
+    if (caption) {
+      msgPayload.caption = caption;
+    }
+
+    console.log(`[WA] Mengirim dokumen ${resolvedName} (${buffer.length} bytes) ke ${targetJid}...`);
+    const sent = await this.sock.sendMessage(targetJid, msgPayload);
+    if (sent?.key?.id && sent?.message) {
+      this.storeMessage(sent.key.id, sent.message);
+    }
+    return sent;
+  }
+
+  async handleDocumentDeliveryRequest(senderJid, cleanSender, userText) {
+    const fs = require('fs');
+    const path = require('path');
+    const lower = String(userText || '').toLowerCase();
+
+    await this.reply(senderJid, '⏳ Menyiapkan dokumen PDF dan mengirimkannya langsung ke chat WhatsApp ini...');
+
+    const possibleDirs = [
+      '/root/documents',
+      'D:\\Hyper-V',
+      'F:\\BACKUP_SYSTEM_IMAGE',
+      path.resolve(__dirname, '..', 'data')
+    ];
+
+    const availableFiles = [];
+    for (const d of possibleDirs) {
+      try {
+        if (fs.existsSync(d)) {
+          const files = fs.readdirSync(d);
+          for (const f of files) {
+            if (f.toLowerCase().endsWith('.pdf')) {
+              const fullPath = path.join(d, f);
+              if (!availableFiles.some(af => af.name.toLowerCase() === f.toLowerCase())) {
+                availableFiles.push({ name: f, path: fullPath });
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    if (availableFiles.length === 0) {
+      return await this.reply(senderJid, '⚠️ Dokumen PDF belum tersedia di direktori dokumen server.');
+    }
+
+    let filesToSend = [];
+    if (lower.includes('cyber') || lower.includes('security') || lower.includes('siber')) {
+      filesToSend = availableFiles.filter(f => f.name.toLowerCase().includes('cyber'));
+    } else if (lower.includes('backup') || lower.includes('sistem') || lower.includes('panduan')) {
+      filesToSend = availableFiles.filter(f => f.name.toLowerCase().includes('backup') || f.name.toLowerCase().includes('sistem'));
+    }
+
+    if (filesToSend.length === 0) {
+      filesToSend = availableFiles;
+    }
+
+    let successCount = 0;
+    for (const fileObj of filesToSend) {
+      try {
+        const caption = `📄 *DOKUMEN RESMI SERVER: ${fileObj.name}*\nDisiapkan dan dikirimkan secara otomatis oleh Antigravity SecOps AI.`;
+        await this.sendDocument(senderJid, fileObj.path, fileObj.name, caption);
+        successCount++;
+      } catch (err) {
+        console.error(`[WA Send Doc Error] Gagal kirim ${fileObj.name}:`, err.message);
+      }
+    }
+
+    if (successCount > 0) {
+      return await this.reply(senderJid, `✅ Berhasil mengirimkan ${successCount} file dokumen PDF ke WhatsApp Anda.`);
+    } else {
+      return await this.reply(senderJid, `❌ Terjadi kendala teknis saat mengunggah dokumen ke WhatsApp.`);
     }
   }
 
