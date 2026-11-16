@@ -1952,8 +1952,6 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
     const path = require('path');
     const lower = String(userText || '').toLowerCase();
 
-    await this.reply(senderJid, '⏳ Menyiapkan dokumen PDF dan mengirimkannya langsung ke chat WhatsApp ini...');
-
     const possibleDirs = [
       '/root/documents',
       'D:\\Hyper-V',
@@ -1978,25 +1976,49 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
       } catch {}
     }
 
-    if (availableFiles.length === 0) {
-      return await this.reply(senderJid, '⚠️ Dokumen PDF belum tersedia di direktori dokumen server.');
+    // Filter file yang PERSIS SESUAI DENGAN PERMINTAAN USER (Strict Topic Matching)
+    let matchedFiles = [];
+
+    if (lower.includes('market') || lower.includes('digital') || lower.includes('pemasaran')) {
+      matchedFiles = availableFiles.filter(f => f.name.toLowerCase().includes('marketing'));
+    } else if (lower.includes('cyber') || lower.includes('security') || lower.includes('siber') || lower.includes('keamanan')) {
+      matchedFiles = availableFiles.filter(f => f.name.toLowerCase().includes('cyber'));
+    } else if (lower.includes('backup') || lower.includes('cadangan') || lower.includes('server') || lower.includes('manual') || lower.includes('sop') || lower.includes('panduan')) {
+      matchedFiles = availableFiles.filter(f => f.name.toLowerCase().includes('backup') || f.name.toLowerCase().includes('sistem'));
+    } else if (lower.includes('ssd') || lower.includes('pemulihan') || lower.includes('restore') || lower.includes('recovery')) {
+      matchedFiles = availableFiles.filter(f => f.name.toLowerCase().includes('pemulihan') || f.name.toLowerCase().includes('restore'));
     }
 
-    let filesToSend = [];
-    if (lower.includes('cyber') || lower.includes('security') || lower.includes('siber')) {
-      filesToSend = availableFiles.filter(f => f.name.toLowerCase().includes('cyber'));
-    } else if (lower.includes('backup') || lower.includes('sistem') || lower.includes('panduan')) {
-      filesToSend = availableFiles.filter(f => f.name.toLowerCase().includes('backup') || f.name.toLowerCase().includes('sistem'));
+    // Jika belum ada pencocokan pasti, cari kata kunci kata dalam nama file
+    if (matchedFiles.length === 0) {
+      const words = lower.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3 && !['buatkan', 'kirimkan', 'kirim', 'tolong', 'minta', 'dokumen', 'document', 'tentang', 'bentuk', 'sekarang', 'selesai', 'sini'].includes(w));
+      if (words.length > 0) {
+        matchedFiles = availableFiles.filter(f => {
+          const fname = f.name.toLowerCase();
+          return words.some(w => fname.includes(w));
+        });
+      }
     }
 
-    if (filesToSend.length === 0) {
-      filesToSend = availableFiles;
+    if (matchedFiles.length === 0) {
+      // Jika dokumen topik baru belum ada, masukkan tugas ke Antigravity
+      const bridge = require('./antigravityBridge');
+      const taskRes = bridge.enqueueTask(cleanSender, userText, 'WhatsApp Document Request');
+      return await this.reply(senderJid,
+`📝 *PERMINTAAN DOKUMEN DITERIMA (#${taskRes.task.id})*
+-----------------------------------------
+• *Topik Permintaan:* ${userText}
+• *Status:* ⏳ Sedang Disusun oleh Antigravity
+-----------------------------------------
+Dokumen PDF khusus untuk topik tersebut sedang disusun secara otomatis oleh Antigravity dan akan segera dikirimkan ke chat WhatsApp ini begitu selesai.`);
     }
+
+    await this.reply(senderJid, `⏳ Menyiapkan dokumen PDF yang sesuai dengan permintaan Anda: *${matchedFiles.map(m => m.name).join(', ')}*...`);
 
     let successCount = 0;
-    for (const fileObj of filesToSend) {
+    for (const fileObj of matchedFiles) {
       try {
-        const caption = `📄 *DOKUMEN RESMI SERVER: ${fileObj.name}*\nDisiapkan dan dikirimkan secara otomatis oleh Antigravity SecOps AI.`;
+        const caption = `📄 *DOKUMEN RESMI:* ${fileObj.name}\nDisusun khusus sesuai permintaan Anda oleh Antigravity AI.`;
         await this.sendDocument(senderJid, fileObj.path, fileObj.name, caption);
         successCount++;
       } catch (err) {
@@ -2005,9 +2027,9 @@ Jawablah dengan ringkas, ramah, dan profesional dalam Bahasa Indonesia. Jika mem
     }
 
     if (successCount > 0) {
-      return await this.reply(senderJid, `✅ Berhasil mengirimkan ${successCount} file dokumen PDF ke WhatsApp Anda.`);
+      return await this.reply(senderJid, `✅ Dokumen *${matchedFiles.map(m => m.name).join(', ')}* berhasil dikirimkan.`);
     } else {
-      return await this.reply(senderJid, `❌ Terjadi kendala teknis saat mengunggah dokumen ke WhatsApp.`);
+      return await this.reply(senderJid, `❌ Terjadi kendala teknis saat mengirimkan file dokumen.`);
     }
   }
 
