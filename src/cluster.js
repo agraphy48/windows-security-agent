@@ -133,7 +133,8 @@ class ClusterManager {
       let body = '';
       let receivedBytes = 0;
       let aborted = false;
-      const MAX_BODY = 1048576; // 1MB Max Buffer Protection
+      const isDocUpload = url === '/api/cluster/send-document';
+      const MAX_BODY = isDocUpload ? 25 * 1024 * 1024 : 1048576; // 25MB untuk upload dokumen, 1MB untuk data biasa
 
       req.on('data', chunk => {
         if (aborted) return;
