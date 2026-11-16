@@ -511,6 +511,9 @@ EOF_VHOST
    * Mulai background watcher otomatis berkala
    */
   startWatcher() {
+    if (process.platform !== 'win32') {
+      return; // Hanya dijalankan pada host Windows (node-01) untuk sinkronisasi VPS -> Local
+    }
     if (this.timer) return;
     const intervalMs = this.intervalMinutes * 60 * 1000;
     console.log(`[⏱️ VpsClusterSyncer] Background auto-sync aktif. Memindai setiap ${this.intervalMinutes} menit.`);
